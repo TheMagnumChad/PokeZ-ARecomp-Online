@@ -229,6 +229,17 @@ list wins.
 
 Mods that change the game's code (`exefs`, IPS patches, cheat plugins) do not work with a recompiled game.
 
+### Brazilian Portuguese translation
+
+The separately obtained **Traduções PKG vBETA1.0.2** translation can be tried with Lumiose. Extract its ZIP, then
+install the `PTBR` folder inside `Versão 1.0 & 1.0.1 COM GOLPES E ITENS TRADUZIDOS/emulador/0100f43008c44000/`
+from the **Mods** page. Set the **game language** to English and restart the game. The launcher uses the current
+game's file index rather than the old index included with the translation.
+
+Menus and dialogue were checked on game version 2.0.2 in an offline test. The translation was originally made for
+versions 1.0 and 1.0.1: later-game content, DLC and online play have not been fully verified and may not be translated
+or may have compatibility problems. The translation is not included with the launcher.
+
 ## DirectX 12
 
 ZA Recomp normally runs on your graphics card's **Vulkan** driver. On Windows it can also run the same renderer on the

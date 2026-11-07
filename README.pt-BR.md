@@ -226,6 +226,17 @@ acima na lista.
 
 Mods que mudam o código do jogo (`exefs`, patches IPS, plugins de cheats) não funcionam num jogo recompilado.
 
+### Tradução para português do Brasil
+
+A tradução **Traduções PKG vBETA1.0.2**, obtida separadamente, pode ser testada com o Lumiose. Extraia o ZIP e instale
+pela página **Mods** a pasta `PTBR` dentro de
+`Versão 1.0 & 1.0.1 COM GOLPES E ITENS TRADUZIDOS/emulador/0100f43008c44000/`. Em **Idioma do jogo**, selecione inglês
+e reinicie o jogo. O launcher usa o índice de arquivos do jogo atual, não o índice antigo incluído na tradução.
+
+Menus e diálogos foram verificados na versão 2.0.2 em um teste offline. A tradução foi criada para as versões 1.0 e
+1.0.1: o conteúdo mais avançado, o DLC e o jogo online não foram totalmente verificados e podem não estar traduzidos
+ou apresentar problemas de compatibilidade. A tradução não acompanha o launcher.
+
 ## DirectX 12
 
 O ZA Recomp normalmente roda no driver **Vulkan** da sua placa de vídeo. No Windows ele também pode rodar o mesmo
