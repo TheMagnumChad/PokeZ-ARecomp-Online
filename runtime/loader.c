@@ -246,6 +246,7 @@ void loader_load(const char *exefs) {
         load_nso(m, extra, base);
         if (m->base + m->size > SDK_BASE) FATAL("Lumiose test module overlaps sdk\n");
         // Exlaunch expects the startup module to precede main in the memory map.
+        if (GUEST_LO >= MAIN_BASE) FATAL("Lumiose needs a guest memory layout with room for rtld before main\n");
         m = &g_modules[g_nmodules++];
         memset(m, 0, sizeof *m);
         m->name = "rtld";

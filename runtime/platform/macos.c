@@ -25,6 +25,7 @@
 
 #include "../paths.h"
 #include "../platform.h"
+#include "../rt.h"
 #include "posix_log.h"
 
 void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
@@ -80,17 +81,24 @@ void plat_init(void) {
     raise_open_file_limit();
 }
 
+static bool map_guest_range(uint64_t lo, uint64_t hi, int flags) {
+    mach_vm_address_t a = lo;
+    return mach_vm_allocate(mach_task_self(), &a, hi - lo, VM_FLAGS_FIXED | flags) == KERN_SUCCESS;
+}
+
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     // Everything readable/writable: macOS pages are 16K but the guest maps at 4K granularity.
     // Untouched pages cost nothing.
-    mach_vm_address_t a = lo;
-    return mach_vm_allocate(mach_task_self(), &a, hi - lo, VM_FLAGS_FIXED) == KERN_SUCCESS;
+    if (!map_guest_range(lo, GUEST_CORE_HI, 0)) return false;
+    if (map_guest_range(ALIAS_BASE, hi, 0)) return true;
+    mach_vm_deallocate(mach_task_self(), lo, GUEST_CORE_HI - lo);
+    return false;
 }
 
 // Fresh zero pages over the whole window (the old ones are released at once).
 bool plat_reset_guest(uint64_t lo, uint64_t hi) {
-    mach_vm_address_t a = lo;
-    return mach_vm_allocate(mach_task_self(), &a, hi - lo, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE) == KERN_SUCCESS;
+    return map_guest_range(lo, GUEST_CORE_HI, VM_FLAGS_OVERWRITE) &&
+           map_guest_range(ALIAS_BASE, hi, VM_FLAGS_OVERWRITE);
 }
 
 void plat_commit(uint64_t addr, uint64_t size) { (void)addr; (void)size; }

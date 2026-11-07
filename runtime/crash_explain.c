@@ -96,8 +96,10 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
     // GPU starts said "LAS Recomp stopped", #159)
     const char *app = g_game_is_la && rt_romfs_files >= 0 ? "LAS Recomp" : "ZA Recomp";
     char head[160], what[600];
+#ifndef __APPLE__
     extern void vk_compile_crash_note(void) __attribute__((weak));  // (Vulkan: was this thread compiling a pipeline?)
     if (vk_compile_crash_note && g_pc && rt_compile_crash_at(g_pc)) vk_compile_crash_note();
+#endif
     // (the file count is Link's Awakening's: Pokémon Z-A's RomFS has its own, and every crash read as missing files)
     if (g_game_is_la && rt_romfs_files >= 0 && rt_romfs_files < ROMFS_FILES) {
         snprintf(head, sizeof head, "Your game files are incomplete");

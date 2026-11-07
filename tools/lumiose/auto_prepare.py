@@ -218,7 +218,7 @@ def patch_generated(work, build_id):
 
 
 def main():
-    from platform_paths import WINDOWS, GAME_LIBRARY, MODULE_LIBRARY
+    from platform_paths import GAME_LIBRARY, MODULE_LIBRARY, LIBRARY_SUFFIX
     p = argparse.ArgumentParser()
     for arg in ('candidate', 'reference', 'game', 'vanilla', 'exe', 'zig', 'cache', 'work'):
         p.add_argument('--' + arg, type=Path, required=True)
@@ -250,10 +250,11 @@ def main():
     gen = ROOT / 'tools' / 'gen.py'
     run([py, str(gen), 'lumiose', str(staged / 'subsdk9'), '0x7006200000', str(bootstrap), '--simd', 'c'],
         env, a.work / 'bootstrap-generation.log')
+    bootstrap_library = a.work / ('bootstrap' + LIBRARY_SUFFIX)
     env.update(LUMIOSE_GENERATED_DIR=str(bootstrap), LUMIOSE_MODULE_OBJECT_DIR=str(a.work / 'bootstrap-objects'),
-               LUMIOSE_LIBRARY_OUTPUT=str(a.work / ('bootstrap.dll' if WINDOWS else 'bootstrap.so')))
+               LUMIOSE_LIBRARY_OUTPUT=str(bootstrap_library))
     run([py, str(ROOT / 'tools' / 'lumiose' / 'build_module.py')], env, a.work / 'bootstrap-build.log')
-    capture(a.exe, a.game, a.work, staged / 'subsdk9', a.work / ('bootstrap.dll' if WINDOWS else 'bootstrap.so'), a.vanilla,
+    capture(a.exe, a.game, a.work, staged / 'subsdk9', bootstrap_library, a.vanilla,
             candidate.build_id, snapshot=True)
     for script in ('prepare_patched_modules.py', 'find_hook_entries.py'):
         run([py, str(ROOT / 'tools' / 'lumiose' / script)], env, a.work / (script + '.log'))

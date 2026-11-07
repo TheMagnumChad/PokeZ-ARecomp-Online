@@ -1173,7 +1173,13 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         case 9: v = 0; break;
         case 11: v = ((uint64_t)arc4random() << 32) | arc4random(); break;
         case 12: v = GUEST_LO; break;
-        case 13: v = GUEST_HI - GUEST_LO; break;
+        case 13:  // only the contiguous range is available for randomized guest mappings
+#ifdef __APPLE__
+            v = GUEST_CORE_HI - GUEST_LO;
+#else
+            v = GUEST_HI - GUEST_LO;
+#endif
+            break;
         case 14: v = STACK_BASE; break;
         case 15: v = STACK_SIZE; break;
         case 16: v = g_system_resource_size; break;

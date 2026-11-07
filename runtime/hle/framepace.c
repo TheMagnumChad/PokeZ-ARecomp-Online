@@ -86,11 +86,13 @@ static bool fps60_holds(void) {
     uint64_t b = renderer_shader_builds();
     bool building = (b >> 63) || (b & ~(1ull << 63)) - (b0 & ~(1ull << 63)) >= 2;  // (one now, or a few this second)
     b0 = b;
+#ifndef __APPLE__
     // (nor seconds with the window resized - a new swapchain or a long image acquire, vulkan/device.c, #178)
     extern uint64_t vk_window_stalls(void) __attribute__((weak));
     static uint64_t w0;
     uint64_t wn = vk_window_stalls ? vk_window_stalls() : 0;
     if (wn != w0) building = true, w0 = wn;
+#endif
     if (!building) slow = fps < min ? slow + 1 : 0;
     if (slow < FPS60_SLOW_S) return true;
     g_fps60_fell_back = true;

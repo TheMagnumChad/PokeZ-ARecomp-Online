@@ -2935,9 +2935,10 @@ static uint64_t hmix(uint64_t h, const void *p, size_t n) {
 #define PIPE_TAB 8192
 static struct { uint64_t key; void *pipe; } pipe_tab[PIPE_TAB];
 
-static uint64_t pipeline_state_hash(Prog *pr) {
+static uint64_t pipeline_state_hash(Prog *pr, uint8_t topo) {
     uint64_t h = 0xcbf29ce484222325ull;
     h = hmix(h, &pr, sizeof pr);
+    if (pr->vi->writes_layer) h = hmix(h, &topo, sizeof topo);
     h = hmix(h, &st.rt.ncolor, sizeof st.rt.ncolor);
     for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
         NvnTexture *t = st.rt.color[i];
@@ -2996,6 +2997,10 @@ static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
 static void pipeline_desc(MTLRenderPipelineDescriptor *pd, Prog *pr, const ShaderRec *r) {
     pd.vertexFunction = pr->vs;
     pd.fragmentFunction = pr->fs;
+    // Metal requires the primitive class when the vertex shader selects a render target layer.
+    if (pr->vi->writes_layer)
+        pd.inputPrimitiveTopology = r->topo == 0 ? MTLPrimitiveTopologyClassPoint :
+                                    r->topo == 1 ? MTLPrimitiveTopologyClassLine : MTLPrimitiveTopologyClassTriangle;
     MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
     uint32_t used_streams = 0;
     for (int i = 0; i < 32; i++) {
@@ -3067,6 +3072,7 @@ static NSString *pipeline_key(MTLRenderPipelineDescriptor *pd, Prog *pr) {
     for (int s = 18; s < 31; s++)
         [pk appendFormat:@" l%lu/%lu/%lu", (unsigned long)vd.layouts[s].stride, (unsigned long)vd.layouts[s].stepFunction, (unsigned long)vd.layouts[s].stepRate];
     [pk appendFormat:@" s%lu a%d", (unsigned long)pd.rasterSampleCount, pd.alphaToCoverageEnabled];
+    if (pr->vi->writes_layer) [pk appendFormat:@" t%lu", (unsigned long)pd.inputPrimitiveTopology];
     return pk;
 }
 
@@ -3186,7 +3192,7 @@ static void draw(CmdRec *r, bool indexed) {
         else used_streams |= 1u << ((a >> 8) & 0x1F);
     }
     // pipeline
-    uint64_t phash = pipeline_state_hash(pr);
+    uint64_t phash = pipeline_state_hash(pr, shader_topo_class((uint32_t)r->x[0]));
     uint32_t pslot = (uint32_t)(phash ^ (phash >> 29)) & (PIPE_TAB - 1);
     while (pipe_tab[pslot].key && pipe_tab[pslot].key != phash) pslot = (pslot + 1) & (PIPE_TAB - 1);
     id<MTLRenderPipelineState> pipe = pipe_tab[pslot].key ? (__bridge id<MTLRenderPipelineState>)pipe_tab[pslot].pipe : nil;

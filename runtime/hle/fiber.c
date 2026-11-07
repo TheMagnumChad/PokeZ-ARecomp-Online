@@ -15,6 +15,10 @@
 // resume the fiber on another thread. A switch copies the running thread's identity (thread object, TLS) into the
 // Cpu of the fiber it starts or resumes. The guest-visible state stays as the SDK leaves it: the 0xf0-byte register
 // frame on the fiber's stack, its sp in FiberType+0x50.
+#if defined(__APPLE__)
+#define _XOPEN_SOURCE 700  // ucontext.h is gated behind it in the macOS SDK
+#define _DARWIN_C_SOURCE
+#endif
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>

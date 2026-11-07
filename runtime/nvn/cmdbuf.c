@@ -152,6 +152,7 @@ static CmdRec *record(Cpu *c, uint32_t op, uint32_t extra, Snap *s) {
     CmdRec *r = rec(c, cb_of(s->x[0]), op, extra);
     memcpy(r->x, s->x + 1, sizeof r->x);
     memcpy(r->f, s->f, sizeof r->f);
+#ifndef __APPLE__
     {   // (debug: LARECOMP_POOL_WATCH, vulkan/exec.c) an indexed draw into the watched range, as recorded
         extern void pw_draw_note(const void *rec, uint32_t op, uint64_t ibuf, const char *what);
         if (op == CMD_DRAW_ELEMENTS) pw_draw_note(r, op, r->x[3], "record");
@@ -169,6 +170,7 @@ static CmdRec *record(Cpu *c, uint32_t op, uint32_t extra, Snap *s) {
         extern void ib_note(CmdRec *r, bool at_record);
         ib_note(r, true);
     }
+#endif
     return r;
 }
 // record with a copy of `len` bytes from the guest pointer in argument `arg`
@@ -374,7 +376,7 @@ NVN(nvnCommandBufferGetCopyRowStride) { NvnCmdBuf *cb = cb_of(A(0)); RET(cb ? cb
 NVN(nvnCommandBufferGetCopyImageStride) { NvnCmdBuf *cb = cb_of(A(0)); RET(cb ? cb->copy_image_stride : 0); }
 
 // ---- clears
-NVN(nvnCommandBufferClearColor) { record_copy(c, CMD_CLEAR_COLOR, 2, 16); }
+NVN(nvnCommandBufferClearColor) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 0; }
 NVN(nvnCommandBufferClearColori) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 1; }
 NVN(nvnCommandBufferClearColorui) { CmdRec *r = record_copy(c, CMD_CLEAR_COLOR, 2, 16); r->x[5] = 2; }
 PLAIN(nvnCommandBufferClearDepthStencil, CMD_CLEAR_DEPTH_STENCIL)

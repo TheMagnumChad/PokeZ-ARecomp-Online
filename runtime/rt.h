@@ -26,12 +26,14 @@ static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt,
 #define FATAL(...) (rt_fatal_msg(__VA_ARGS__), rt_fatal_trace())  // (runtime/crash_explain.c keeps the line)
 
 // ---- address space layout (guest addresses == host addresses)
-// macOS reserves 0x2_0000_0000-0x70_0000_0000, and guest addresses must fit in 39 bits, so the
-// guest lives in a 12.5 GB window at 0x70_0000_0000 claimed at startup (see main.c).
-#define GUEST_LO     0x6ffff00000ull  // leave room for the experimental rtld module before main
+// The guest addresses must fit in 39 bits. macOS claims the core and alias windows separately
+// so that randomized host mappings can stay between them.
 #ifdef __APPLE__
-#define GUEST_HI     0x7320000000ull
+#define GUEST_LO     0x7000000000ull
+#define GUEST_CORE_HI 0x7320000000ull
+#define GUEST_HI     0x8000000000ull
 #else  // room for an SDK's virtual address memory too (Pokémon Legends Z-A reserves 12 GB; MAP_NORESERVE)
+#define GUEST_LO     0x6ffff00000ull  // leave room for the experimental rtld module before main
 #define GUEST_HI     0x7800000000ull
 #endif
 #define MAIN_BASE    0x7000000000ull
@@ -43,8 +45,8 @@ static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt,
 #define HLE_HEAP     0x7092000000ull   // guest-visible memory owned by host code
 #define HLE_HEAP_SIZE 0x000E000000ull
 #ifdef __APPLE__
-#define ALIAS_BASE   0x7100000000ull   // alias region (svcMapMemory targets)
-#define ALIAS_SIZE   0x0100000000ull
+#define ALIAS_BASE   0x7c00000000ull
+#define ALIAS_SIZE   0x0400000000ull
 #else  // alias region (svcMapMemory targets; an SDK's virtual address memory reserves its address regions here)
 #define ALIAS_BASE   0x7400000000ull
 #define ALIAS_SIZE   0x0400000000ull   // 16 GB, up to GUEST_HI

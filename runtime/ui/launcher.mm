@@ -47,6 +47,7 @@ bool controls_ui_took_back(void);  // ui/controls_ui.mm: B went back a step on C
 void input_mouse_release(SDL_Window *w);   // runtime/hle/input.c
 void ui_window_init(void);
 SDL_Window *ui_window(void);
+void rt_launcher_log(const char *fmt, ...);  // runtime/launcher_log.c: logs/launcher.log and stderr
 #ifdef __APPLE__
 void *ui_metal_layer(void);
 void *ui_metal_device(void);
@@ -104,7 +105,6 @@ static bool build_is_za(const uint8_t id[8]) { return build_version(id) && memcm
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): ZA Recomp's v<major>.<minor>.<patch> (Hexveil404/PokeZ-ARecomp releases).
 #define LARECOMP_VERSION "v0.1.26"
-extern "C" void rt_launcher_log(const char *fmt, ...);  // runtime/launcher_log.c: logs/launcher.log and stderr
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
 
