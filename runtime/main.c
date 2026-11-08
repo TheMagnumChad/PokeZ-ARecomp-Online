@@ -107,6 +107,8 @@ static void rtld_init_main(Cpu *c) {
         lumiose_test_initializing = 1;
         module_init(c, &g_modules[2]);
         lumiose_test_initializing = 0;
+        // The mod may initialize its bridge in its constructors, after NSO loading.
+        { extern void lumiose_chat_bridge_init(void); lumiose_chat_bridge_init(); }
         LOG("[lumiose test] module initialization returned\n");
         extern void lumiose_test_snapshot(void);
         lumiose_test_snapshot();
@@ -232,6 +234,7 @@ static void boot(const char *root) {
     if (!game_version_select(root, why, sizeof why)) FATAL("%s\n", why);  // (the address table: game_addresses.h)
     if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
+    { extern void lumiose_chat_bridge_init(void); lumiose_chat_bridge_init(); }
     rando_boot();  // the chosen seed's data patches go into the freshly loaded module
     { extern void settings_load(void); settings_load(); }
     kernel_init();

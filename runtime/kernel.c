@@ -872,6 +872,8 @@ out:
 
 // ------------------------------------------------------------------ debug output
 static void debug_string(uint64_t p, uint64_t len) {
+    extern void lumiose_keyboard_debug(const char *, size_t);
+    lumiose_keyboard_debug((const char *)(uintptr_t)p, (size_t)len);
     fprintf(stderr, "[guest] %.*s", (int)len, (const char *)(uintptr_t)p);
     if (len && ((const char *)(uintptr_t)p)[len - 1] != '\n') fputc('\n', stderr);
 }

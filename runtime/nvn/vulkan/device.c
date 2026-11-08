@@ -2234,6 +2234,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (menu_at && (long)frame + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
         // (ImGui records through vk_overlay_begin / vk_overlay_end, when it draws anything)
         vk_hdr_mark_base();
+        menu_set_game_viewport((float)vx, (float)vy, (float)vw, (float)vh);
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         pp_mark(PP_OVERLAY);
         static long win_shot = -1;

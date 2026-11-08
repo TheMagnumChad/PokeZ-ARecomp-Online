@@ -38,6 +38,8 @@ extern int g_game_is_la;  // runtime/kernel.c: Link's Awakening (its own tabs: r
 extern const char *g_save_dir;
 #include "menu.h"
 void input_reset(void);
+bool lumiose_legacy_chat_key(const SDL_Event *e);
+void lumiose_legacy_chat_keyboard_result(bool cancelled);
 void save_editor_draw(float scale);  // save_editor.mm
 extern "C" int game_in_play(void);  // hle/warp.c
 void save_editor_on_open(void);
@@ -51,6 +53,8 @@ bool controls_ui_took_back(void);
 bool rando_tab_took_back(void);  // rando_tab.mm: B went back from the Triforce hunt's count
 #include "../input_bind.h"
 #include "../paths.h"
+#include "../hle/lumiose_chat_native.h"
+#include "../hle/lumiose_chat_bridge.h"
 extern "C" bool vk_dlaa_wanted(void);  // (runtime/nvn/vulkan/dlaa.c: F1 > Temporal anti-aliasing DLAA)
 extern "C" bool vk_dlaa_available(void);
 }
@@ -155,8 +159,13 @@ static std::atomic<bool> g_last_pad{false};
 static char g_kbd_text[1024];
 static int g_kbd_max = 8;
 static std::atomic<bool> g_kbd_chat{false};
+static std::atomic<int> g_kbd_field{0};  // 1 chat, 2 market, 3 mail message, 4 mail money
 static std::atomic<unsigned> g_kbd_sequence{0};
 static std::atomic<float> g_chat_send_left{0}, g_chat_send_top{0}, g_chat_send_right{0}, g_chat_send_bottom{0};
+static float g_game_view_x, g_game_view_y, g_game_view_w, g_game_view_h;
+extern "C" void menu_set_game_viewport(float x, float y, float w, float h) {
+    g_game_view_x = x; g_game_view_y = y; g_game_view_w = w; g_game_view_h = h;
+}
 // (DevTools, runtime/ui/devtools.mm - weak: absent from a build without it)
 extern "C" __attribute__((weak)) bool devtools_open(void);
 extern "C" __attribute__((weak)) void devtools_toggle(void);
@@ -203,13 +212,13 @@ bool menu_handle_event(const SDL_Event *e) {
         g_kbd = 2;
         return true;
     }
+    if (!capturing() && (lumiose_chat_native_event(e) || lumiose_legacy_chat_key(e))) return true;
     // typing (a text field, the on-screen keyboard, the name entry): keys are text, not menu shortcuts
     bool typing = g_kbd.load() == 1 || (g_open.load() && g_text_busy.load());
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
         if (!e->key.repeat && e->key.scancode == SDL_SCANCODE_F10 && devtools_toggle && getenv("LARECOMP_DEVTOOLS")) { devtools_toggle(); return true; }
-        if (!e->key.repeat && (e->key.scancode == SDL_SCANCODE_F1 ||
-                               (e->key.scancode == SDL_SCANCODE_ESCAPE && !g_open.load()))) {
+        if (!e->key.repeat && e->key.scancode == SDL_SCANCODE_F1) {
             if (!typing) set_open(!g_open.load());  // (Esc with the menu open goes to ImGui below: it cancels a field)
             return true;
         }
@@ -249,6 +258,10 @@ bool menu_handle_event(const SDL_Event *e) {
         }
         if (!capturing()) return false;
         ImGuiKey k = ui_pad_key(e->gbutton.which, e->gbutton.button, down);  // (confirm / back: pad_nav.h)
+        if (down && g_kbd.load() == 1 && k == ImGuiKey_GamepadFaceRight) {
+            g_kbd = 3;  // Cancel text entry with the configured back button.
+            return true;
+        }
         if (k != ImGuiKey_None) { QEvent q = {}; q.kind = QEvent::KEY; q.key = k; q.down = down; push(q); }
         return true;
     }
@@ -277,7 +290,35 @@ bool menu_handle_event(const SDL_Event *e) {
         { QEvent q = {}; q.kind = QEvent::MOUSE_POS; q.x = e->motion.x * g_pixel_density; q.y = e->motion.y * g_pixel_density; push(q); }
         return capturing();  // (DevTools only: the game gets it too)
     case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
-        if (g_kbd_chat.load() && g_kbd.load() == 1 && e->type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+        if (!capturing() && e->button.button == SDL_BUTTON_LEFT) {
+            static bool native_click;
+            if (e->type == SDL_EVENT_MOUSE_BUTTON_UP && native_click) { native_click = false; return true; }
+            if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN && g_game_view_h > 0) {
+                LumioseChatScale cs = lumiose_chat_scale_read(g_save_dir);
+                float h = g_game_view_h / 1080.0f * cs.ui;
+                float x = e->button.x * g_pixel_density, y = e->button.y * g_pixel_density;
+                LumioseChatSnapshot bridge;
+                if (lumiose_chat_bridge_snapshot(&bridge) && bridge.version == 2 &&
+                    (bridge.state & LUMIOSE_CHAT_OTHER_WINDOW)) {
+                    float cx = g_game_view_x + g_game_view_w * 0.5f, cy = g_game_view_y + g_game_view_h * 0.5f;
+                    unsigned field_id = 0;
+                    if (bridge.focus_field == 2 && x >= cx - 784 * h && x < cx + 120 * h &&
+                        y >= cy - 318 * h && y < cy - 278 * h) field_id = 2;
+                    if (bridge.focus_field >= 7 && bridge.focus_field <= 9 && x >= cx - 560 * h && x < cx + 560 * h) {
+                        if (y >= cy - 294 * h && y < cy - 246 * h) field_id = 7;
+                        else if (y >= cy - 234 * h && y < cy - 186 * h) field_id = 8;
+                        else if (y >= cy - 174 * h && y < cy - 126 * h) field_id = 9;
+                    }
+                    if (field_id && lumiose_chat_native_window_click(field_id)) { native_click = true; return true; }
+                }
+                float top = g_game_view_y + g_game_view_h - 46 * h;
+                bool row = y >= top && y < top + 32 * h;
+                bool field = row && x >= g_game_view_x + 20 * h && x < g_game_view_x + 394 * h;
+                bool send = row && x >= g_game_view_x + 394 * h && x < g_game_view_x + 462 * h;
+                if ((field || send) && lumiose_chat_native_click(send)) { native_click = true; return true; }
+            }
+        }
+        if (g_kbd_field.load() == 1 && g_kbd.load() == 1 && e->type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
             e->button.button == SDL_BUTTON_LEFT) {
             float x = e->button.x * g_pixel_density, y = e->button.y * g_pixel_density;
             if (x >= g_chat_send_left.load() && x < g_chat_send_right.load() &&
@@ -308,8 +349,9 @@ extern "C" uint32_t g_window_resize_request;  // (test scripts: runtime/hle/inpu
 void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
+    lumiose_chat_native_tick();
     static bool text_input;
-    bool want_text = capturing();
+    bool want_text = capturing() || lumiose_chat_native_wants_text();
     if (want_text != text_input) {
         if (want_text) SDL_StartTextInput(w);
         else SDL_StopTextInput(w);
@@ -1209,29 +1251,54 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
             chat_scale = lumiose_chat_scale_read(g_save_dir);
             last_scale_read = now;
         }
-        float hud = io.DisplaySize.y / 1080.0f * chat_scale.ui;
-        float top = io.DisplaySize.y - 46 * hud;
-        g_chat_send_left = 394 * hud; g_chat_send_right = 462 * hud;
-        g_chat_send_top = top; g_chat_send_bottom = top + 32 * hud;
-        ImGui::SetNextWindowPos(ImVec2(20 * hud, top + 2 * hud), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(367 * hud, 24 * hud), ImGuiCond_Always);
+        float vx = g_game_view_w > 0 ? g_game_view_x : 0;
+        float vy = g_game_view_h > 0 ? g_game_view_y : 0;
+        float vh = g_game_view_h > 0 ? g_game_view_h : io.DisplaySize.y;
+        float hud = vh / 1080.0f * chat_scale.ui;
+        float vw = g_game_view_w > 0 ? g_game_view_w : io.DisplaySize.x;
+        float small_view = fmaxf(0.0f, fminf(1.0f, (1080.0f - vh) / 360.0f));
+        int field = g_kbd_field.load();
+        float left, top, width, height;
+        if (field == 2) {  // Market: search text on the row above the listings.
+            left = vx + vw * 0.5f - 784 * hud;
+            top = vy + vh * 0.5f - 312 * hud;
+            width = 904 * hud; height = 30 * hud;
+        } else if (field == 3 || field == 4) {  // Mailbox: the selected value row.
+            left = vx + vw * 0.5f - 400 * hud;
+            top = vy + vh * 0.5f - ((field == 3 ? 222 : 162) - 4 * small_view) * hud;
+            width = 850 * hud; height = (30 + 10 * small_view) * hud;
+        } else {
+            top = vy + vh - 46 * hud;
+            left = vx + 20 * hud; width = 376 * hud; height = 23 * hud;
+            g_chat_send_left = vx + 394 * hud; g_chat_send_right = vx + 462 * hud;
+            g_chat_send_top = top; g_chat_send_bottom = top + 32 * hud;
+            top += 3 * hud;
+        }
+        ImGui::SetNextWindowPos(ImVec2(left, top), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4 * hud, 3 * hud));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 1.0f * hud);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                            ImVec2(4 * hud, (3 + (field == 3 || field == 4 ? 5 * small_view : 0)) * hud));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.03f, 0.08f, 0.10f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.03f, 0.08f, 0.10f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.03f, 0.08f, 0.10f, 1.0f));
         ImGui::Begin("##lumiose-chat-input", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar);
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
         if (g_chat_font) ImGui::PushFont(g_chat_font);
-        ImGui::SetWindowFontScale(chat_scale.ui * chat_scale.text * (g_chat_font ? 1.0f : 16.0f / 34.0f));
+        float font_scale = field == 1 ? chat_scale.ui : hud;
+        ImGui::SetWindowFontScale(font_scale * chat_scale.text * (g_chat_font ? 1.0f : 16.0f / 34.0f));
         static unsigned focused_sequence;
         unsigned sequence = g_kbd_sequence.load();
         if (focused_sequence != sequence) { ImGui::SetKeyboardFocusHere(); focused_sequence = sequence; }
         ImGui::SetNextItemWidth(-1);
-        ImGui::InputText("##chat", g_kbd_text,
+        char input_id[48];
+        snprintf(input_id, sizeof input_id, "##lumiose-input-%u", sequence);
+        ImGui::InputText(input_id, g_kbd_text,
                          (size_t)(g_kbd_max * 4 + 1 < (int)sizeof g_kbd_text ? g_kbd_max * 4 + 1 : sizeof g_kbd_text),
                          ImGuiInputTextFlags_CallbackCharFilter,
                          [](ImGuiInputTextCallbackData *d) -> int { return d->EventChar < 0x20 ? 1 : 0; });
@@ -1240,7 +1307,7 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
         ImGui::SetWindowFontScale(1.0f);
         ImGui::End();
         ImGui::PopStyleColor(4);
-        ImGui::PopStyleVar(4);
+        ImGui::PopStyleVar(6);
         return;
     }
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 120));
@@ -1277,11 +1344,12 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
 
 // Game thread (runtime/hle/swkbd.c): show the dialog, re-present the last frame until it's answered.
 // Returns 1 confirmed (out = text, UTF-8), 0 cancelled.
-extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, int cap, bool chat) {
+extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, int cap, int field) {
     extern void backend_represent(void);
     snprintf(g_kbd_text, sizeof g_kbd_text, "%s", initial ? initial : "");
     g_kbd_max = max_len > 0 && max_len < (int)sizeof g_kbd_text / 4 ? max_len : 8;
-    g_kbd_chat = chat;
+    g_kbd_field = field;
+    g_kbd_chat = field != 0;
     g_kbd_sequence.fetch_add(1);
     input_reset();
     g_kbd = 1;
@@ -1304,11 +1372,14 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
         if (dt < 16) SDL_Delay((uint32_t)(16 - dt));
     }
     kbd_cut(g_kbd_text, g_kbd_max);  // (whatever entered it: typed, on-screen keys, the test hook)
-    bool ok = g_kbd.load() == 2 && g_kbd_text[0];
+    bool ok = g_kbd.load() == 2;
     if (ok) snprintf(out, cap, "%s", g_kbd_text);
+    g_kbd_text[0] = 0;  // Do not retain a sent message in the launcher input widget.
     g_kbd = 0;
     g_kbd_chat = false;
+    g_kbd_field = 0;
     input_reset();
+    if (field == 1) lumiose_legacy_chat_keyboard_result(!ok);
     return ok;
 }
 

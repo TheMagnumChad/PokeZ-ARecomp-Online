@@ -1,7 +1,7 @@
 // Controller input: SDL keyboard/gamepad -> nn::hid Npad state.
 //
 // Both go through the player's bindings (runtime/hle/bindings.c, defaults there: keyboard WASD left stick, arrows
-// d-pad, K/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus / Minus, numpad 8/4/5/6 right stick;
+// d-pad, Space/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus / Minus, numpad 8/4/5/6 right stick;
 // controller by position, Switch A = east).
 #include <SDL3/SDL.h>
 #include <ctype.h>
@@ -18,6 +18,7 @@
 #include "../rumble.h"
 #include "../led.h"
 #include "../ui/menu.h"
+#include "lumiose_chat_bridge.h"
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
@@ -242,6 +243,93 @@ static void recompute_pad(void) {
 // that is released is still given to the game's next polls (fill_state). UI thread: note_press; game thread: the rest.
 static _Atomic uint64_t press_unseen;  // pressed (events), not yet in a state the game polled
 static _Atomic uint64_t tap_buttons;   // released while unseen: the game's next poll gets them
+static _Atomic int lumiose_wheel_steps;
+static _Atomic int lumiose_chat_wheel_pending;  // Retained if the bridge ring is full.
+extern int lumiose_scroll_menu_open(void);
+
+// The pre-1.4.4 mod has no chat-focus signal. Keyboard chat mode is entered
+// explicitly with Enter and exited with Escape or when the keyboard opens.
+// Keep generated presses separate from physical controls and hold them long
+// enough for the mod to observe them even at a low frame rate.
+static _Atomic bool legacy_chat_mode;
+static pthread_mutex_t legacy_chat_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { uint64_t button; unsigned ms; } legacy_chat_queue[32];
+static unsigned legacy_chat_read, legacy_chat_write;
+static uint64_t legacy_chat_until, legacy_chat_release_until, legacy_chat_button;
+static bool legacy_chat_enqueue(uint64_t button, unsigned ms) {
+    pthread_mutex_lock(&legacy_chat_lock);
+    bool room = legacy_chat_write - legacy_chat_read < 32;
+    if (room) {
+        unsigned i = legacy_chat_write++ % 32;
+        legacy_chat_queue[i].button = button;
+        legacy_chat_queue[i].ms = ms;
+    }
+    pthread_mutex_unlock(&legacy_chat_lock);
+    return room;
+}
+bool input_lumiose_queue_direction(int direction) {
+    return legacy_chat_enqueue(1ull << (direction < 0 ? BTN_UP : BTN_DOWN), 90);
+}
+static uint64_t legacy_chat_pulse(void) {
+    uint64_t now = SDL_GetTicks(), result = 0;
+    pthread_mutex_lock(&legacy_chat_lock);
+    if (legacy_chat_button && now >= legacy_chat_until) {
+        legacy_chat_button = 0;
+        legacy_chat_release_until = now + 80;
+    }
+    if (!legacy_chat_button && now >= legacy_chat_release_until && legacy_chat_read != legacy_chat_write) {
+        unsigned i = legacy_chat_read++ % 32;
+        legacy_chat_button = legacy_chat_queue[i].button;
+        legacy_chat_until = now + legacy_chat_queue[i].ms;
+    }
+    result = legacy_chat_button;
+    pthread_mutex_unlock(&legacy_chat_lock);
+    return result;
+}
+bool lumiose_legacy_chat_key(const SDL_Event *e) {
+    if (e->type != SDL_EVENT_KEY_DOWN && e->type != SDL_EVENT_KEY_UP) return false;
+    LumioseChatSnapshot snapshot;
+    if (lumiose_chat_bridge_snapshot(&snapshot)) return false;
+    if (!getenv("LUMIOSE_PREPARE_BUILD_ID") || g_nmodules <= 2 || lumiose_scroll_menu_open()) {
+        atomic_store(&legacy_chat_mode, false);
+        return false;
+    }
+    SDL_Scancode key = e->key.scancode;
+    bool active = atomic_load(&legacy_chat_mode);
+    if (getenv("LARECOMP_TEXT_CONTEXT_LOG") && e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat &&
+        (key == SDL_SCANCODE_RETURN || key == SDL_SCANCODE_KP_ENTER || key == SDL_SCANCODE_ESCAPE || key == SDL_SCANCODE_TAB))
+        LOG("[chat-input] key %d legacy focus %d\n", (int)key, active);
+    if (!active && key != SDL_SCANCODE_RETURN && key != SDL_SCANCODE_KP_ENTER) return false;
+    if (!active && (e->key.mod & (SDL_KMOD_ALT | SDL_KMOD_GUI | SDL_KMOD_CTRL))) return false;
+    uint64_t button = 0; unsigned duration = 90;
+    if (key == SDL_SCANCODE_RETURN || key == SDL_SCANCODE_KP_ENTER) {
+        button = 1ull << (active ? BTN_A : BTN_MINUS);
+        if (!active) duration = 700;
+    } else if (active) {
+        switch (key) {
+        case SDL_SCANCODE_ESCAPE: button = 1ull << BTN_B; break;
+        case SDL_SCANCODE_TAB: button = 1ull << ((e->key.mod & SDL_KMOD_SHIFT) ? BTN_L : BTN_R); break;
+        case SDL_SCANCODE_LEFT: button = 1ull << BTN_LEFT; break;
+        case SDL_SCANCODE_RIGHT: button = 1ull << BTN_RIGHT; break;
+        default: return false;
+        }
+    }
+    if (!button) return false;
+    if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat && legacy_chat_enqueue(button, duration)) {
+        if (!active) atomic_store(&legacy_chat_mode, true);
+        else if (key == SDL_SCANCODE_ESCAPE || key == SDL_SCANCODE_RETURN || key == SDL_SCANCODE_KP_ENTER)
+            atomic_store(&legacy_chat_mode, false);
+    }
+    return true;
+}
+// Cancelling the chat keyboard returns to the still-open chat. Confirming it
+// sends and closes chat, so only cancellation restores the legacy focus hint.
+void lumiose_legacy_chat_keyboard_result(bool cancelled) {
+    LumioseChatSnapshot snapshot;
+    if (!lumiose_chat_bridge_snapshot(&snapshot) && getenv("LUMIOSE_PREPARE_BUILD_ID") && g_nmodules > 2)
+        { atomic_store(&legacy_chat_mode, cancelled);
+          if (getenv("LARECOMP_TEXT_CONTEXT_LOG")) LOG("[chat-input] keyboard cancelled %d\n", cancelled); }
+}
 // The same mapping as recompute_pad's, ZL by position included: by letter here, a move pressed with ZL held left its
 // by-letter button unseen, and the release gave the game a tap of it - the move on the other side, used when the
 // pressed one was cooling down (#42)
@@ -251,7 +339,9 @@ static uint64_t pad_bits(int host) {   // the game buttons bound to host button 
         if (pad_host(i, pad_by_pos) == host) b |= 1ull << i;
     return b;
 }
+uint64_t input_gamepad_button_bits(int host) { return pad_bits(host); }
 static void note_press(uint64_t down, uint64_t up) {
+    if (down) { extern void lumiose_keyboard_note_buttons(uint64_t); lumiose_keyboard_note_buttons(down); }
     if (down) press_unseen |= down;
     if (up) {
         uint64_t u = atomic_fetch_and(&press_unseen, ~up) & up;
@@ -259,9 +349,26 @@ static void note_press(uint64_t down, uint64_t up) {
     }
 }
 
+// Native chat consumes key-up events too; clear keys held when it takes focus
+// so a movement key cannot remain stuck after the player finishes typing.
+void input_release_keyboard_for_chat(void) {
+    memset(keys_down, 0, sizeof keys_down);
+    recompute_keyboard();
+}
+
 // Forget held keys (the menu took focus); the gamepad is re-read on its next event.
 void input_reset(void) {
     press_unseen = 0, tap_buttons = 0;
+    // Releases while a text dialog owns input never reach input_handle_event.
+    // Drop the previously held game buttons until the next controller event.
+    atomic_store(&pad_buttons, 0);
+    atomic_store(&lumiose_wheel_steps, 0);
+    atomic_store(&lumiose_chat_wheel_pending, 0);
+    atomic_store(&legacy_chat_mode, false);
+    pthread_mutex_lock(&legacy_chat_lock);
+    legacy_chat_read = legacy_chat_write = 0;
+    legacy_chat_until = legacy_chat_release_until = legacy_chat_button = 0;
+    pthread_mutex_unlock(&legacy_chat_lock);
     rumble_clear();
     memset(keys_down, 0, sizeof keys_down);
     recompute_keyboard();
@@ -459,6 +566,11 @@ extern bool menu_cursor_needed(void);   // (the cursor wanted on screen: the men
 // the window and the controls - not with the menu or the name entry up (they take the mouse), nor without focus.
 void input_mouse_update(SDL_Window *w) {
     touch_window = w;
+    int pending_chat = atomic_exchange(&lumiose_chat_wheel_pending, 0);
+    if (pending_chat) {
+        int result = lumiose_chat_bridge_scroll((int16_t)pending_chat);
+        if (result == 0) atomic_fetch_add(&lumiose_chat_wheel_pending, pending_chat);
+    }
     if (menu_input_captured() || (!(SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS) && !getenv("LUMIOSE_MOUSE_TOUCH_TEST"))) {
         touch_active = 0; touch_pending = 0;
         if (!(SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS)) keys_down[SDL_SCANCODE_LALT] = 0;
@@ -575,6 +687,32 @@ void input_handle_event(const SDL_Event *e) {
         if (e->type == SDL_EVENT_MOUSE_BUTTON_UP) mouse_down[m] = 0;
         else if (mouse_held) mouse_down[m] = 1;
         recompute_mouse();
+        break;
+    }
+    case SDL_EVENT_MOUSE_WHEEL: {
+        // The mod's lists already navigate with the d-pad. Do not send wheel input to the game world.
+        static float fraction;
+        if (menu_input_captured()) { fraction = 0; break; }
+        float y = e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y;
+        if (!isfinite(y)) break;
+        if (y > 20) y = 20; if (y < -20) y = -20;
+        fraction += y;
+        int steps = (int)fraction;
+        fraction -= steps;
+        if (steps && lumiose_scroll_menu_open()) {
+            int old = atomic_load(&lumiose_wheel_steps), next;
+            do { next = old + steps; if (next > 20) next = 20; if (next < -20) next = -20; }
+            while (!atomic_compare_exchange_weak(&lumiose_wheel_steps, &old, next));
+        } else if (steps && atomic_load(&legacy_chat_mode)) {
+            for (int i = 0; i < abs(steps); i++)
+                if (!legacy_chat_enqueue(1ull << (steps > 0 ? BTN_UP : BTN_DOWN), 90)) break;
+        } else if (steps) {
+            int pending = atomic_exchange(&lumiose_chat_wheel_pending, 0) + steps;
+            if (pending > 32767) pending = 32767;
+            if (pending < -32767) pending = -32767;
+            int result = lumiose_chat_bridge_scroll((int16_t)pending);
+            if (result == 0) atomic_fetch_add(&lumiose_chat_wheel_pending, pending);
+        }
         break;
     }
     case SDL_EVENT_MOUSE_MOTION:  // the mouse turns the camera (right stick): cursor held, or the right button held
@@ -1095,6 +1233,37 @@ static void fill_state(Cpu *c) {
         } else if (f > tap_frame) tap = 0;
     }
     uint64_t b = menu ? script_buttons : held | tap | script_buttons;
+    if (!menu) b |= legacy_chat_pulse();
+    {   // One wheel notch per d-pad press, with a release frame between presses.
+        extern uint64_t renderer_present_count(void);
+        static uint64_t frame_seen = UINT64_MAX, pulse;
+        static bool was_pressed;
+        uint64_t frame = renderer_present_count();
+        if (!lumiose_scroll_menu_open() || menu) {
+            atomic_store(&lumiose_wheel_steps, 0);
+            pulse = 0; was_pressed = false; frame_seen = frame;
+        } else if (frame != frame_seen) {
+            frame_seen = frame;
+            pulse = 0;
+            if (was_pressed) was_pressed = false;
+            else {
+                int old = atomic_load(&lumiose_wheel_steps);
+                while (old) {
+                    int next = old > 0 ? old - 1 : old + 1;
+                    if (atomic_compare_exchange_weak(&lumiose_wheel_steps, &old, next)) {
+                        extern int lumiose_market_page_direction(int wheel_up);
+                        int page = lumiose_market_page_direction(old > 0);
+                        pulse = 1ull << (page < 0 ? BTN_LEFT : page > 0 ? BTN_RIGHT : old > 0 ? BTN_UP : BTN_DOWN);
+                        extern void lumiose_keyboard_note_buttons(uint64_t);
+                        lumiose_keyboard_note_buttons(pulse);
+                        was_pressed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        b |= pulse;
+    }
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
         static uint64_t until;

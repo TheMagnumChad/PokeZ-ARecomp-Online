@@ -1,5 +1,13 @@
 // In-game overlay menu (Dear ImGui). Open with F1 / Esc, or Minus+Plus (Back+Start) on a controller.
 #pragma once
+// Rectangle occupied by the presented game image, in window pixels.
+#ifdef __cplusplus
+extern "C" {
+#endif
+void menu_set_game_viewport(float x, float y, float w, float h);
+#ifdef __cplusplus
+}
+#endif
 #include <stdbool.h>
 #include <stdint.h>
 
