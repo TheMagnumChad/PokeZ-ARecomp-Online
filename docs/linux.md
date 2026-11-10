@@ -32,6 +32,16 @@ Steam with Steam Input on, the game sees Steam's virtual Xbox controller (Xbox p
 If the AppImage won't start with a FUSE error, install your distribution's `fuse3` package, or run it with
 `APPIMAGE_EXTRACT_AND_RUN=1`. On a Steam Deck, put `APPIMAGE_EXTRACT_AND_RUN=1 %command%` in the game's launch options.
 
+### AMD RDNA4 and Mesa 27.0-devel
+
+On Radeon RX 9000 (RDNA4, `GFX1201`) the Mesa `27.0.0-devel` RADV driver (`mesa-git`) crashes inside
+`libvulkan_radeon` at the game's first draw (`SIGSEGV` in `vkCmdDraw`). The game build is fine: the same files run on
+the stable Mesa `26.2.6` (`mesa` / `vulkan-radeon`). Install the stable packages
+(`sudo pacman -S mesa vulkan-radeon` on Arch / CachyOS), or use a stable RADV from another prefix with
+`VK_DRIVER_FILES` / `VK_ICD_FILENAMES`, `LD_LIBRARY_PATH=<prefix>/usr/lib` and
+`VK_LOADER_LAYERS_DISABLE=VK_LAYER_MESA_device_select`. The start screen logs a warning when it sees the crashing
+driver and GPU.
+
 ## Building from source
 Ubuntu / Debian packages (other distributions: the same libraries under their names). SDL3 must be 3.4 or newer
 (LAS Recomp loads and saves PNGs through it); where the distribution ships an older one (Debian 13 has 3.2), build SDL3

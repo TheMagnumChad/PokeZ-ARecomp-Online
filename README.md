@@ -273,6 +273,12 @@ card's **DirectX 12** driver, which helps where the Vulkan driver crashes or mis
   **Settings > Video > Compatibility** and turn the options off one at a time. They apply from the next start.
 - **The game crashes on Vulkan** (often on AMD cards): try **F1 > Display > Graphics API: DirectX 12**
   ([DirectX 12](#directx-12)).
+- **AMD Radeon RX 9000 (RDNA4) with Mesa 27.0-devel**: the development RADV driver (`mesa-git` 27.0.0-devel) crashes
+  inside `libvulkan_radeon` at the game's first draw (`SIGSEGV` in `vkCmdDraw`; the launcher logs this combination).
+  Use the stable **Mesa 26.2.6** `mesa` / `vulkan-radeon` packages instead (`sudo pacman -S mesa vulkan-radeon` on
+  Arch / CachyOS), or point the game at a stable RADV with `VK_DRIVER_FILES` / `VK_ICD_FILENAMES`,
+  `LD_LIBRARY_PATH=<dir>/usr/lib` and `VK_LOADER_LAYERS_DISABLE=VK_LAYER_MESA_device_select` (the portable driver
+  route). The same game build runs on 26.2.6.
 - **Low frame rate**: lower the internal resolution or turn on Dynamic resolution, and turn off the optional graphics
   features.
 
