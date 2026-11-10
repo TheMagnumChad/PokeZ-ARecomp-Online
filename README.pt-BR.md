@@ -74,6 +74,7 @@ para *The Legend of Zelda: Link's Awakening*.
 - Todos os botões e teclas podem ser remapeados; os ícones dos botões seguem o seu controle (Xbox, PlayStation,
   Nintendo, Steam Deck, teclado). Controles Xbox / PlayStation / Steam usam os próprios rótulos A/B/X/Y; controles
   Nintendo mantêm as posições do Switch
+- No nome, A digita, B apaga, Start / Menu confirma (ou selecione OK); teclado na tela para qualquer controle conectado
 - Golpes por posição e encaixe do analógico direito no eixo
 
 **Tela inicial**
