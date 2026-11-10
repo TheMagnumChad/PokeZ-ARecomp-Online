@@ -273,6 +273,12 @@ renderizador no driver **DirectX 12** da placa, o que ajuda quando o driver Vulk
   início.
 - **O jogo trava no Vulkan** (comum em placas AMD): experimente **F1 > Tela > API gráfica: DirectX 12**
   ([DirectX 12](#directx-12)).
+- **AMD Radeon RX 9000 (RDNA4) com Mesa 27.0-devel**: o driver RADV de desenvolvimento (`mesa-git` 27.0.0-devel) trava
+  dentro de `libvulkan_radeon` no primeiro desenho do jogo (`SIGSEGV` em `vkCmdDraw`; o launcher registra essa
+  combinação). Use os pacotes estáveis **Mesa 26.2.6** `mesa` / `vulkan-radeon` (`sudo pacman -S mesa vulkan-radeon`
+  no Arch / CachyOS), ou aponte o jogo para um RADV estável com `VK_DRIVER_FILES` / `VK_ICD_FILENAMES`,
+  `LD_LIBRARY_PATH=<dir>/usr/lib` e `VK_LOADER_LAYERS_DISABLE=VK_LAYER_MESA_device_select` (o driver portátil). O
+  mesmo build do jogo roda no 26.2.6.
 - **Fps baixo**: diminua a resolução interna ou ligue a resolução Dinâmica, e desligue os recursos gráficos opcionais.
 - **Relatar um bug**: [abra uma issue](https://github.com/Hexveil404/PokeZ-ARecomp/issues) com a sua GPU, a versão do
   driver, a versão do jogo e o `logs/play.log`.

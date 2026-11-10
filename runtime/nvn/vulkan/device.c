@@ -139,7 +139,10 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
     static atomic_uint n;
     bool stop = sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && getenv("LARECOMP_VK_VALIDATION_STOP");
     if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT &&
-        (stop || atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 500)) LOG("[vk] %s\n", d->pMessage);
+        (stop || atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 500)) {
+        LOG("[vk] %s\n", d->pMessage);
+        launcher_log_file("[vk] %s\n", d->pMessage);  // (the game's stderr is not kept; validation errors must survive)
+    }
     if (stop) {
         LOG("[vk] stopping at the first validation error\n");
         fflush(stderr);
@@ -308,6 +311,16 @@ static void pick_device(void) {
             t == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "dedicated" : t == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated" : "other",
             (double)vram / (1u << 30), dp.driverName, dp.driverInfo, VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
             VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion));
+        // Mesa 27.0-devel's RADV on RDNA4 (GFX1201, Radeon RX 9070) crashes inside libvulkan_radeon's vkCmdDraw at the
+        // game's first full-screen 3-vertex draw. The same game and build run on Mesa 26.2.6. Not something the renderer
+        // can work around: warn loudly and point at the stable driver (README Troubleshooting).
+        if (!strcmp(dp.driverName, "radv") && strstr(dp.driverInfo, "Mesa 27.0") &&
+            strstr(dp.driverInfo, "devel") && strstr(g_vk.props.deviceName, "GFX1201")) {
+            LOG("[vk] warning: Mesa 27.0-devel RADV on RDNA4 crashes in vkCmdDraw; install Mesa 26.2.6 (stable) or "
+                "use the VK_DRIVER_FILES workaround (README Troubleshooting)\n");
+            launcher_log_file("[vk] warning: Mesa 27.0-devel RADV on RDNA4 crashes in vkCmdDraw; install Mesa 26.2.6 "
+                              "(stable) or use the VK_DRIVER_FILES workaround (README Troubleshooting)\n");
+        }
     }
     settings_resolve_defaults(g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
     {   // this PC's recommended video settings (settings.c): applied at the first start, offered to older settings files
