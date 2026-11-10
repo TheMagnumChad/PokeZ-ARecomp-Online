@@ -114,8 +114,12 @@ bool lumiose_chat_native_click(bool send) {
     if (send) {
         if (!focused || !owns_draft || close_pending) return false;
         send_pending = true;
+        return true;
     }
-    return true;
+    // A tap on the already focused row opens the keyboard ("Tap here ... to type"). The first tap only focused it;
+    // swallowing the second left the row looking ready while no text field was ever opened.
+    if (lumiose_chat_bridge_command(LUMIOSE_CHAT_OPEN_KEYBOARD, 0, NULL)) return true;
+    return false;
 }
 bool lumiose_chat_native_event(const SDL_Event *e) {
     LumioseChatSnapshot s;
@@ -133,6 +137,11 @@ bool lumiose_chat_native_event(const SDL_Event *e) {
                 if (bits & (1ull << BIND_B)) { dirty = send_pending = false; close_pending = true; }
                 else send_pending = true;
                 pad_owned[button] = true; return true;
+            }
+            // The focused chat row says "Press A ... to type": open the keyboard instead of letting A fall through
+            // to the game (which opened the pause menu).
+            if (!has_edit && has_chat && (bits & (1ull << BIND_A))) {
+                if (lumiose_chat_bridge_command(LUMIOSE_CHAT_OPEN_KEYBOARD, 0, NULL)) { pad_owned[button] = true; return true; }
             }
             if (s.version == 2 && !has_edit && !(s.state & LUMIOSE_CHAT_KEYBOARD) &&
                 s.focus_field >= 2 && s.focus_field <= 13) {
