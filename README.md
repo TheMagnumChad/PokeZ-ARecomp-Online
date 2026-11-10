@@ -57,6 +57,8 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 
 **Graphics** (all optional, off by default)
 - Upscaling with AMD FSR 1, anti-aliasing with SMAA or AMD FSR 2 (temporal), sharpening
+- Optional AMD FSR 4.1.2 temporal upscaling on Linux with a user-supplied FidelityFX provider (RDNA4; see
+  [docs/linux.md](docs/linux.md#fsr-412-temporal-upscaling-optional-linux))
 - HDR output (HDR10 / scRGB)
 - Ambient occlusion (GTAO), indirect light (screen-space GI) and water reflections
 - Sharper shadows (higher shadow map resolution) and high-quality texture filtering
@@ -273,12 +275,12 @@ card's **DirectX 12** driver, which helps where the Vulkan driver crashes or mis
   **Settings > Video > Compatibility** and turn the options off one at a time. They apply from the next start.
 - **The game crashes on Vulkan** (often on AMD cards): try **F1 > Display > Graphics API: DirectX 12**
   ([DirectX 12](#directx-12)).
-- **AMD Radeon RX 9000 (RDNA4) with Mesa 27.0-devel**: the development RADV driver (`mesa-git` 27.0.0-devel) crashes
-  inside `libvulkan_radeon` at the game's first draw (`SIGSEGV` in `vkCmdDraw`; the launcher logs this combination).
-  Use the stable **Mesa 26.2.6** `mesa` / `vulkan-radeon` packages instead (`sudo pacman -S mesa vulkan-radeon` on
-  Arch / CachyOS), or point the game at a stable RADV with `VK_DRIVER_FILES` / `VK_ICD_FILENAMES`,
-  `LD_LIBRARY_PATH=<dir>/usr/lib` and `VK_LOADER_LAYERS_DISABLE=VK_LAYER_MESA_device_select` (the portable driver
-  route). The same game build runs on 26.2.6.
+- **AMD Radeon RX 9000 (RDNA4) with Mesa 27.0-devel**: older mesa-git builds crashed inside `libvulkan_radeon` at
+  the game's first draw because RADV 27 only initialized its PS epilog shader cache when a dynamic-state extension
+  feature bit was set; Vulkan 1.3 has extended dynamic state 1 in core, so no bit was set. The renderer now enables
+  the promoted `VK_EXT_extended_dynamic_state` feature on 1.3 devices as well, which makes RADV initialize the cache.
+  Mesa 26.2.6 (stable) and current mesa-git both work; no stable-driver downgrade is needed. See
+  [docs/linux.md](docs/linux.md#amd-rdna4-and-mesa-270-devel).
 - **Low frame rate**: lower the internal resolution or turn on Dynamic resolution, and turn off the optional graphics
   features.
 

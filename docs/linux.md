@@ -34,13 +34,32 @@ If the AppImage won't start with a FUSE error, install your distribution's `fuse
 
 ### AMD RDNA4 and Mesa 27.0-devel
 
-On Radeon RX 9000 (RDNA4, `GFX1201`) the Mesa `27.0.0-devel` RADV driver (`mesa-git`) crashes inside
-`libvulkan_radeon` at the game's first draw (`SIGSEGV` in `vkCmdDraw`). The game build is fine: the same files run on
-the stable Mesa `26.2.6` (`mesa` / `vulkan-radeon`). Install the stable packages
-(`sudo pacman -S mesa vulkan-radeon` on Arch / CachyOS), or use a stable RADV from another prefix with
-`VK_DRIVER_FILES` / `VK_ICD_FILENAMES`, `LD_LIBRARY_PATH=<prefix>/usr/lib` and
-`VK_LOADER_LAYERS_DISABLE=VK_LAYER_MESA_device_select`. The start screen logs a warning when it sees the crashing
-driver and GPU.
+On Radeon RX 9000 (RDNA4, `GFX1201`) older Mesa `27.0.0-devel` RADV builds (`mesa-git`) crashed inside
+`libvulkan_radeon` at the game's first draw: `radv_shader_part_cache_get()` dereferenced a NULL `cache->ops` because
+`device->ps_epilogs` had never been initialized. RADV 27 initializes that cache only when one of the dynamic-state
+feature bits is enabled, but extended dynamic state 1 is **core** in Vulkan 1.3 and the renderer (correctly) used it
+without enabling the promoted extension's feature struct. Mesa 26.2.6 did not have the gating, so it worked.
+
+The renderer works around this by enabling the promoted `VK_EXT_extended_dynamic_state` extension and its feature bit
+on Vulkan 1.3 devices too; the commands remain the core ones. This is legal and makes RADV initialize the cache.
+Mesa 26.2.6 and current mesa-git both run the game. The correct driver-side fix is to initialize `ps_epilogs`
+unconditionally (or for `VK_API_VERSION_1_3`); a local build with that change runs the original binary too.
+
+No stable-driver downgrade is needed. `LARECOMP_VK_COMPAT=1` (the Vulkan 1.2 path) also avoids it if you need a quick
+comparison run.
+
+### FSR 4.1.2 temporal upscaling (optional, Linux)
+
+F1 > Video > Temporal anti-aliasing > **AMD FSR 4.1.2** runs AMD's FSR 4.1.2 through a user-supplied Linux provider,
+`libamd_fidelityfx_upscaler_vk.so`, with its `fsr4-assets/` folder. Put both next to `lasrecomp` (or set
+`LARECOMP_FSR4_PATH` to the `.so` or its folder). The provider is not part of this repository: it is built from the
+owner's FidelityFX SDK 2.4.0 copy and the signed AMD binaries/assets are not redistributed here.
+
+The GPU must expose `VK_KHR_cooperative_matrix` and `VK_EXT_shader_float8` (RDNA4; the RX 9070 XT works). The device
+features are enabled on the first start when FSR 4 is selected. If the provider is missing or the GPU lacks the
+features, the game falls back to FSR 2 (FSR 3.1 on Windows) and logs why. `LARECOMP_FSR4=0` disables the request; `=1` requests it
+without changing the saved setting. FSR 4 currently receives neutral depth (the provider cannot use PokeZ's D32S8
+depth directly), so depth-based disocclusion is left to the model's color/motion-vector path.
 
 ## Building from source
 Ubuntu / Debian packages (other distributions: the same libraries under their names). SDL3 must be 3.4 or newer
