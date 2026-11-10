@@ -14,7 +14,9 @@ For the packaged Windows release, see `LUMIOSE-RELEASE.md` for first-run
 instructions. To build or work on the integration from a source checkout,
 build the launcher with the Windows instructions, and use ZA Recomp's normal
 setup to make `extracted/` and its game library from your own game files. The
-game must be version 2.0.2.
+game must be version 2.0.2. A `.nup` whose update tree is 2.0.2 works the same
+and needs no keys; put the Mega Dimension DLC 2 `.nsp` next to it (with your
+`prod.keys` / `title.keys`) if you want the DLC.
 The integration scripts require Python with `unicorn`, `capstone` and `lz4`,
 the built `build/lasrecomp.dll.a`, and ZA Recomp's Zig distribution.
 
