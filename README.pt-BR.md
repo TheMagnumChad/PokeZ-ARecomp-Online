@@ -59,6 +59,8 @@ para *The Legend of Zelda: Link's Awakening*.
 
 **Gráficos** (todos opcionais, desligados por padrão)
 - Upscaling com AMD FSR 1, anti-aliasing com SMAA ou AMD FSR 2 (temporal), nitidez
+- AMD FSR 4.1.2 temporal opcional no Linux com um provedor FidelityFX fornecido pelo usuário (RDNA4; veja
+  [docs/linux.md](docs/linux.md#fsr-412-temporal-upscaling-optional-linux))
 - Saída HDR (HDR10 / scRGB)
 - Oclusão de ambiente (GTAO), luz indireta (GI em espaço de tela) e reflexos na água
 - Sombras mais nítidas (mapa de sombras em resolução maior) e filtragem de texturas de alta qualidade
@@ -273,12 +275,12 @@ renderizador no driver **DirectX 12** da placa, o que ajuda quando o driver Vulk
   início.
 - **O jogo trava no Vulkan** (comum em placas AMD): experimente **F1 > Tela > API gráfica: DirectX 12**
   ([DirectX 12](#directx-12)).
-- **AMD Radeon RX 9000 (RDNA4) com Mesa 27.0-devel**: o driver RADV de desenvolvimento (`mesa-git` 27.0.0-devel) trava
-  dentro de `libvulkan_radeon` no primeiro desenho do jogo (`SIGSEGV` em `vkCmdDraw`; o launcher registra essa
-  combinação). Use os pacotes estáveis **Mesa 26.2.6** `mesa` / `vulkan-radeon` (`sudo pacman -S mesa vulkan-radeon`
-  no Arch / CachyOS), ou aponte o jogo para um RADV estável com `VK_DRIVER_FILES` / `VK_ICD_FILENAMES`,
-  `LD_LIBRARY_PATH=<dir>/usr/lib` e `VK_LOADER_LAYERS_DISABLE=VK_LAYER_MESA_device_select` (o driver portátil). O
-  mesmo build do jogo roda no 26.2.6.
+- **AMD Radeon RX 9000 (RDNA4) com Mesa 27.0-devel**: builds antigos do mesa-git travavam dentro de
+  `libvulkan_radeon` no primeiro desenho do jogo porque o RADV 27 só inicializava o cache de epilogs do PS quando um
+  bit de extensão de estado dinâmico estava ligado; no Vulkan 1.3 o estado dinâmico estendido 1 é do núcleo, então
+  nenhum bit era ligado. O renderizador agora ativa o recurso promovido `VK_EXT_extended_dynamic_state` também em
+  dispositivos 1.3, o que faz o RADV inicializar o cache. Mesa 26.2.6 (estável) e o mesa-git atual funcionam; não é
+  preciso voltar para o driver estável. Veja [docs/linux.md](docs/linux.md#amd-rdna4-and-mesa-270-devel).
 - **Fps baixo**: diminua a resolução interna ou ligue a resolução Dinâmica, e desligue os recursos gráficos opcionais.
 - **Relatar um bug**: [abra uma issue](https://github.com/Hexveil404/PokeZ-ARecomp/issues) com a sua GPU, a versão do
   driver, a versão do jogo e o `logs/play.log`.
