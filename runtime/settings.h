@@ -98,6 +98,8 @@ typedef struct {
     int mouse_camera;    // MOUSE_CAM_*: how the mouse turns the camera (runtime/hle/input.c)
     float mouse_sens;    // mouse camera speed, 1 = default
     int rstick_snap;     // degrees: a right stick this close to an axis is put on it (0 = off): runtime/hle/input.c
+    int lstick_deadzone; // percent of the left stick's travel read as rest (0 = off, the stick goes raw): runtime/hle/input.c
+    int lstick_outer;    // percent of its travel from which the left stick reads as full (a pad's diagonals stop short)
     bool blur_removal;   // no tilt-shift blur at the top / bottom of the screen
     bool hide_hero_icon; // no Hero Mode icon on the HUD
     bool mirror_mode;    // the world mirrored left to right (Gameplay tab): renderers + runtime/hle/input.c
@@ -147,6 +149,12 @@ typedef struct {
     bool smooth_anim; // Pokémon Z-A 2.0.2: distant characters animate every frame (runtime/hle/framepace.c
                       // rt_za_smooth_anim). On by default; LARECOMP_SMOOTH_ANIM=0 / 1 overrides it at load.
     int camera_distance; // Pokémon Z-A 2.0.2: follow-camera distance as a percentage, 50-200; 100 is the game's own.
+    bool full_detail; // Pokémon Z-A: every model at its full detail at any distance (cache/maxlod, made from the
+                      // player's game files by zaprompts --maxlod: runtime/ui/launcher.mm launcher_maxlod_kick;
+                      // layered by runtime/services/fs.c). Off by default (GPU time); from the next start. #190
+    int draw_dist;    // Pokémon Z-A: the world's LOD / culling distances in percent (100: the game's; 150, 200, 300):
+                      // cache/drawdist, made from the player's files by zaprompts --drawdist (runtime/ui/launcher.mm
+                      // launcher_drawdist_kick), layered by runtime/services/fs.c. From the next start. #190
     int ui_lang;      // UI_LANG_*: the start screen's language (runtime/ui/launcher.mm); auto = the system's
     // mods/ folders (runtime/services/fs.c layers them): '|' between names. order: first wins where two replace the
     // same file (folders not listed come after, by name); off: not loaded. Edited on the start screen's Mods page.

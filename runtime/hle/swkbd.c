@@ -186,7 +186,10 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
             *(const uint32_t *)(uintptr_t)arg, *(const uint32_t *)(uintptr_t)(arg + 0x3b8));
     }
     char text[1024];
-    int ok = menu_keyboard_run(initial, max_len, text, sizeof text, field);
+    // (research aid) LARECOMP_SWKBD_ANSWER=<text>: answered without the overlay (hidden test runs: the link code)
+    const char *answer = getenv("LARECOMP_SWKBD_ANSWER");
+    int ok = answer ? (snprintf(text, sizeof text, "%s", answer), 1)
+                    : menu_keyboard_run(initial, max_len, text, sizeof text, field);
     if (!ok) snprintf(text, sizeof text, "%s", initial);  // cancelled: keep what was there
     if (mod_keyboard) LOG("[swkbd] Lumiose entry (field %d, max %d, %s): %s (%zu bytes)\n", field, max_len, utf8 ? "UTF-8" : "UTF-16",
                   ok ? "entered" : "cancelled", strlen(text));

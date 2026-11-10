@@ -1151,10 +1151,23 @@ static void create_device(void) {
     // vkCreateDevice -4 on Dozen two minutes after a device loss on AMD's Vulkan driver - D3D12 refused the new device,
     // likely Windows still recovering the GPU or blocking this program after the reset). The settings file already says
     // Vulkan (the Graphics API choice is only kept once the device and swapchain are up), so this can't loop.
-    if (created != VK_SUCCESS && g_vk.dozen && !ENV("LARECOMP_DX12_NO_FALLBACK")) {
-        LOG("[vk] DirectX 12 (Dozen) could not create its device (%d: %s): starting again on Vulkan\n", created,
-            created == VK_ERROR_DEVICE_LOST ? "Direct3D 12 reports the GPU removed or reset" : "Direct3D 12 refused");
-        launcher_log_file("[vk] DirectX 12 could not create its device (%d): started again on Vulkan\n", created);
+    // DirectX 12 on an NVIDIA GPU (the setting, not LARECOMP_DX12=1): the same. It is there for AMD cards whose Vulkan
+    // driver crashes the game; on NVIDIA, Vulkan is the right path, and Dozen there crashed in its own layer at the
+    // first frames (#172, RTX 4050 Laptop, v0.1.17) and, on v0.1.18, froze on the start screen (a fence waited 2 s and
+    // more, nothing drawn) - no crash, so e380c58's switch never came.
+    bool dzn_nvidia = created == VK_SUCCESS && g_vk.dozen && !ENV("LARECOMP_DX12") &&
+                      (g_vk.props.vendorID == 0x10de || strstr(g_vk.props.deviceName, "NVIDIA"));
+    if ((created != VK_SUCCESS || dzn_nvidia) && g_vk.dozen && !ENV("LARECOMP_DX12_NO_FALLBACK")) {
+        if (dzn_nvidia) {
+            LOG("[vk] DirectX 12 (Dozen) on an NVIDIA GPU (%s): starting again on Vulkan, this GPU's own driver "
+                "(LARECOMP_DX12=1 keeps DirectX 12)\n", g_vk.props.deviceName);
+            launcher_log_file("[vk] DirectX 12 on an NVIDIA GPU: started again on Vulkan\n");
+            vkDestroyDevice(g_vk.dev, NULL), g_vk.dev = VK_NULL_HANDLE;
+        } else {
+            LOG("[vk] DirectX 12 (Dozen) could not create its device (%d: %s): starting again on Vulkan\n", created,
+                created == VK_ERROR_DEVICE_LOST ? "Direct3D 12 reports the GPU removed or reset" : "Direct3D 12 refused");
+            launcher_log_file("[vk] DirectX 12 could not create its device (%d): started again on Vulkan\n", created);
+        }
         g_settings.dx12 = false;
         settings_save();
         _putenv_s("VK_DRIVER_FILES", "");
@@ -2432,6 +2445,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     }
 }
 
+static _Atomic long debug_frames_at, debug_frames_n;  // (present_hooks: the frames to dump; debug_frame_after_present)
+void debug_frame_after_present(uint64_t frame);
 // The game thread's side of a present: the frame counters and the per-frame hooks (input, pacing, test hooks).
 static void present_hooks(void) {
     total_frames++;
@@ -2466,7 +2481,16 @@ static void present_hooks(void) {
     // LARECOMP_DEBUG_FRAMES=<n> (with LARECOMP_DEBUG_FRAME / F9): dump n consecutive frames (build/pass_<frame>_NNN.png)
     static long debug_n = -1;
     if (debug_n < 0) { const char *e = ENV("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
-    g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
+    atomic_store(&debug_frames_at, debug_at), atomic_store(&debug_frames_n, debug_n);
+    if (!rq_on()) debug_frame_after_present(total_frames - 1);
+}
+
+// The frames dumped (F9 / LARECOMP_DEBUG_FRAME) are decided where their lists are translated: with the render thread
+// that is after it ran the present before them (rqueue.c) - set here, on the game thread, the flag was over by the
+// time the render thread got to the frame, and F9 caught only its first few passes.
+void debug_frame_after_present(uint64_t frame) {
+    long at = atomic_load(&debug_frames_at), n = atomic_load(&debug_frames_n);
+    g_debug_frame = at && frame + 1 >= (uint64_t)at && frame + 1 < (uint64_t)at + (uint64_t)n;
 }
 
 void backend_present(NvnTexture *t) {
@@ -2598,6 +2622,11 @@ void ui_window_init(void) {
     window = SDL_CreateWindow("ZA Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
+    if (ENV("LARECOMP_WINDOW_POS")) {  // (two games side by side: local play tests)
+        int x = 0, y = 0;
+        sscanf(ENV("LARECOMP_WINDOW_POS"), "%d,%d", &x, &y);
+        SDL_SetWindowPosition(window, x, y);
+    }
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !ENV("LARECOMP_WINDOW") && !ENV("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();

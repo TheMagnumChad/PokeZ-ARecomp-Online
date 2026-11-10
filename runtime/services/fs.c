@@ -256,7 +256,7 @@ static void rom_dir_path(const uint8_t *dmeta, uint32_t dsize, uint32_t dir, cha
 // Pokémon Z-A keeps its files in packs (arc/data.trpfs) listed by arc/data.trpfd, and reads a file from the RomFS
 // only when the list doesn't have it: so the game's data.trpfd is served without the layered files' entries
 // (trpfd_unlist). A mod's own data.trpfd is never used (it's made for the mod's game version).
-static char layer_root[17][1100];  // seed + optional Xbox presentation + 15 user mods
+static char layer_root[19][1100];  // seed + optional Xbox presentation + 15 user mods + full-detail models + draw distance
 static int nlayers = -1;
 static bool trinity;  // the RomFS has arc/data.trpfd
 static uint8_t *xbox_arc;
@@ -307,6 +307,56 @@ static bool xbox_layer_prepare(void) {
     return true;
 }
 
+// F1 > Full-detail models (#190): cache/maxlod/romfs, every model's mesh slots on its full mesh (tools/za/lod_mod.py,
+// made by zaprompts --maxlod from the player's own files: runtime/ui/launcher.mm launcher_maxlod_kick). The last layer:
+// a player's mod with the same model wins. Only for the game it was made from: cache/maxlod/.made holds that game's
+// data.trpfs size (each version's differs), checked against the RomFS served now.
+// F1 > Draw distance (#190): cache/drawdist/romfs, the scene parts holding the world's trinity_ModelLodSetting /
+// trinity_ModelCullingSetting tables with their distances scaled (tools/za/draw_dist.py via zaprompts --drawdist).
+// .made: the data.trpfs size and the factor in percent - both must match this game and the setting.
+bool g_drawdist_on;
+static void drawdist_layer(void) {
+    if (g_settings.draw_dist == 100) return;
+    unsigned long long made = 0;
+    int pct = 0;
+    FILE *f = fopen("cache/drawdist/.made", "rb");
+    if (!f) { LOG("[fs] draw distance %d%%: not made yet (cache/drawdist.log)\n", g_settings.draw_dist); return; }
+    if (fscanf(f, "%llu %d", &made, &pct) != 2) made = 0;
+    fclose(f);
+    RomFile *pack = NULL;
+    for (int i = 0; i < rom_nfiles && !pack; i++)
+        if (!strcmp(rom_files[i].path, "arc/data.trpfs")) pack = &rom_files[i];
+    if (!pack || pack->size != made || pct != g_settings.draw_dist) {
+        LOG("[fs] draw distance %d%%: made for another game version or distance (%llu, %d%%): off until made again\n",
+            g_settings.draw_dist, made, pct);
+        return;
+    }
+    strlcpy(layer_root[nlayers++], "cache/drawdist/romfs", sizeof *layer_root);
+    g_drawdist_on = true;
+    LOG("[fs] draw distance: %d%% (cache/drawdist)\n", pct);
+}
+
+bool g_maxlod_on;  // (this session serves cache/maxlod: F1 says so)
+static void maxlod_layer(void) {
+    if (!g_settings.full_detail) return;
+    unsigned long long made = 0;
+    FILE *f = fopen("cache/maxlod/.made", "rb");
+    if (!f) { LOG("[fs] full-detail models: not made yet (cache/maxlod.log)\n"); return; }
+    if (fscanf(f, "%llu", &made) != 1) made = 0;
+    fclose(f);
+    RomFile *pack = NULL;
+    for (int i = 0; i < rom_nfiles && !pack; i++)
+        if (!strcmp(rom_files[i].path, "arc/data.trpfs")) pack = &rom_files[i];
+    if (!pack || pack->size != made) {
+        LOG("[fs] full-detail models: made for another game version (data.trpfs %llu, now %llu): off until made again\n",
+            made, pack ? (unsigned long long)pack->size : 0ull);
+        return;
+    }
+    strlcpy(layer_root[nlayers++], "cache/maxlod/romfs", sizeof *layer_root);
+    g_maxlod_on = true;
+    LOG("[fs] full-detail models: on (cache/maxlod)\n");
+}
+
 static int name_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
 // mods_order's place (unlisted: after every listed one), then the name
 static int mod_rank(const char *name) {
@@ -333,7 +383,7 @@ static void layer_init(void) {
     const char *seed = rando_seed_dir();
     if (seed) snprintf(layer_root[nlayers++], sizeof *layer_root, "%s/romfs", seed);
     DIR *d = opendir("mods");
-    if (!d) return;
+    if (!d) { maxlod_layer(); drawdist_layer(); return; }  // (no mods folder: ours still)
     char names[15][256];
     int n = 0;
     settings_load();  // (the start screen's Mods page: mods_off, mods_order)
@@ -352,6 +402,8 @@ static void layer_init(void) {
         LOG("[fs] mod: %s\n", names[i]);
         rt_mods_on++;
     }
+    maxlod_layer();
+    drawdist_layer();
 }
 
 static bool layer_file(const char *path, char *out, size_t cap) {
@@ -852,6 +904,40 @@ static void recent_read_note(uint64_t off, uint64_t size, const uint8_t *dst, ss
     recent_reads[i].hash = h, recent_reads[i].got = got;
     pthread_mutex_unlock(&recent_lock);
 }
+// The game's one OodleLZ_Decompress call for its archive reads (FileLoaderFromArchive: f_7001a9bd38 on 2.0.0,
+// f_7001a9b718 on 2.0.2 - serial, threadPhase 3, with a 512 KB decoder memory kept in the thread's TLS), through
+// tools/za_patches.py OODLE_CALL: a decode that returns 0 for data whose bytes are right is decoded again. #173 #206
+// (Windows 11 build 26300 only): the bytes read were the file's own and still intact in memory, yet the decode
+// failed while two of the game's worker threads crashed together - something else wrote into the decoder's state at
+// that moment, and the same bytes decode fine here every time. A retry gets a clean run instead of the svcBreak that
+// ended the session. The arguments (x0-x7 and the 6 on the stack: sp + 0 .. 0x2f) are restored for each try.
+// LARECOMP_OODLE_RETRY=<n> tries after the first (default 2, 0 off). Log: "[oodle] decode failed ... retry n: ok".
+void rt_za_oodle_call(Cpu *c, uint64_t target) {
+    static int tries = -1;
+    if (tries < 0) { const char *e = getenv("LARECOMP_OODLE_RETRY"); tries = e ? atoi(e) : 2; }
+    GuestFn fn = dispatch_lookup(target);
+    uint64_t x[8], st[6], lr = c->x[30];
+    memcpy(x, c->x, sizeof x);
+    for (int i = 0; i < 6; i++) st[i] = LD64(c->sp + 8 * (uint64_t)i);
+    fn(c);
+    {   // LARECOMP_TEST_OODLE_FAIL=<n> (test): every n-th decode reads as failed once - the retry path, on real data
+        static long every = -1, calls;
+        if (every < 0) { const char *e = getenv("LARECOMP_TEST_OODLE_FAIL"); every = e ? atol(e) : 0; }
+        if (every > 0 && ++calls % every == 0) LOG("[oodle] test: decode %ld made to fail\n", calls), c->x[0] = 0;
+    }
+    for (int t = 1; t <= tries && c->x[0] == 0 && x[3] != 0; t++) {
+        LOG("[oodle] decode failed (%llu bytes from %llu): retry %d\n", (unsigned long long)x[3], (unsigned long long)x[1], t);
+        memcpy(c->x, x, sizeof x);
+        for (int i = 0; i < 6; i++) ST64(c->sp + 8 * (uint64_t)i, st[i]);
+        c->x[30] = lr;
+        fn(c);
+        if (c->x[0] != 0) {
+            LOG("[oodle] retry %d: ok (%llu bytes)\n", t, (unsigned long long)c->x[0]);
+            rt_game_data_bad = false;  // (the data was fine after all: a crash later isn't about it)
+        }
+    }
+}
+
 void fs_log_recent_reads(void) {  // (services/am.c: the game's decompressor said its data is damaged)
     pthread_mutex_lock(&recent_lock);
     unsigned n = recent_n < RECENT_READS ? recent_n : RECENT_READS;
@@ -877,6 +963,25 @@ void fs_log_recent_reads(void) {  // (services/am.c: the game's decompressor sai
             h == r[i].hash ? "the same" : "DIFFERENT - the read the game got was wrong");
     }
     free(buf);
+    // (#206 #173: every read "the same", and the compressed bytes at the decompressor's entry matched the disk too, yet
+    // the game's Oodle decoder failed - on two PCs, both Windows 11 build 26300, never here on Windows 10 with the same
+    // save, data and game code. So also: is each buffer the game read into still mapped, and does it still hold what
+    // was read - a page decommitted or overwritten under the decoder (memory) vs everything intact (a race between the
+    // game's threads, or the decoder's own computation). A page that isn't committed isn't touched: reading it would
+    // commit a zero page and change what we look at.)
+    extern int kernel_live_threads(void);
+    LOG("[fs] the game's buffers now (last reads first; %d guest threads running):\n", kernel_live_threads());
+    for (unsigned i = n, k = 0; i-- > 0 && k < 8; k++) {
+        uint64_t a = r[i].addr, sz = r[i].got > 0 ? (uint64_t)r[i].got : 0;
+        char s0[160] = "?", s1[160] = "?";
+        bool known0 = plat_page_state(a, s0, sizeof s0), known1 = sz && plat_page_state(a + sz - 1, s1, sizeof s1);
+        bool readable = !known0 || (strstr(s0, "committed") && (!known1 || strstr(s1, "committed")));
+        const char *now = !sz ? "nothing read" : !readable ? "NOT COMMITTED - not read (left as it is)"
+                        : fnv_words((const uint8_t *)(uintptr_t)a, sz) == r[i].hash ? "still as read"
+                        : "CHANGED since the read (overwritten, or reused for something else)";
+        LOG("[fs]   +%llx at %llx (%llx bytes): first page %s; last page %s; contents %s\n", (unsigned long long)r[i].off,
+            (unsigned long long)a, (unsigned long long)sz, known0 ? s0 : "state unknown here", known1 ? s1 : "-", now);
+    }
 }
 
 // ------------------------------------------------------------------ IStorage (raw RomFS image)
