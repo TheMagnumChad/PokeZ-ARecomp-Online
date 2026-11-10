@@ -756,8 +756,11 @@ static void create_device(void) {
     // Extended dynamic state 1 is core in Vulkan 1.3, but RADV 27 initializes its PS epilog cache only when the
     // extension's feature bit is enabled (radv_device.c: ps_epilogs). Without it, the first draw of a fragment shader
     // with an epilog crashes in radv_shader_part_cache_get (Mesa 27.0-devel, GFX1201). Enabling the promoted extension
-    // on a 1.3 device is legal and sets that bit; the commands stay the core ones below.
-    bool x_ds = !(VK_OFF("eds") && !strstr(cm, "eds2")) && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+    // on a 1.3 device is legal and sets that bit; the commands stay the core ones below. Only RADV needs it, so other
+    // 1.3 drivers keep their previous feature chain.
+    bool radv = strstr(g_vk.props.deviceName, "RADV") != NULL;
+    bool x_ds = !(VK_OFF("eds") && !strstr(cm, "eds2")) && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME) &&
+                (!v13 || radv);
     bool x_ds2 = !v13 && !VK_OFF("eds2") && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
 #undef VK_OFF
     bool fsr4_req = vk_fsr4_wanted();
