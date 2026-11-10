@@ -353,11 +353,11 @@ void menu_apply_window_requests(void *win) {
     lumiose_chat_native_tick();
     static bool text_input;
     bool want_text = capturing() || lumiose_chat_native_wants_text();
-    if (want_text != text_input) {
-        if (want_text) SDL_StartTextInput(w);
-        else SDL_StopTextInput(w);
-        text_input = want_text;
-    }
+    // A focus loss (an overlay, a click on another window) stops SDL's text input by itself. Re-arm it when the
+    // window has the focus again: the open/closed transition alone left the field unable to take typed text.
+    if (want_text && !SDL_TextInputActive(w)) SDL_StartTextInput(w);
+    else if (!want_text && text_input) SDL_StopTextInput(w);
+    text_input = want_text;
     static bool dt_was, dt_maxed;  // DevTools' IDE layout wants room: maximized while open, as it was after
     if (dt_open() != dt_was) {
         dt_was = dt_open();
@@ -1306,7 +1306,9 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
         ImGui::SetWindowFontScale(font_scale * chat_scale.text * (g_chat_font ? 1.0f : 16.0f / 34.0f));
         static unsigned focused_sequence;
         unsigned sequence = g_kbd_sequence.load();
-        if (focused_sequence != sequence) { ImGui::SetKeyboardFocusHere(); focused_sequence = sequence; }
+        if (focused_sequence != sequence || !ImGui::IsAnyItemActive()) {
+            ImGui::SetKeyboardFocusHere(); focused_sequence = sequence;
+        }
         ImGui::SetNextItemWidth(-1);
         char input_id[48];
         snprintf(input_id, sizeof input_id, "##lumiose-input-%u", sequence);
@@ -1335,7 +1337,9 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     static bool was_open, was_pad;
     // A connected pad gets the on-screen keyboard even if Steam Input also sends keyboard events (the last event would
     // otherwise flip the dialog to keyboard mode and leave the pad's buttons doing nothing).
-    bool pad = !g_kbd_chat.load() && (g_last_pad.load() || SDL_HasGamepad()), appearing = !was_open || pad != was_pad;
+    // LARECOMP_KBD_KEYBOARD=1: type with the physical keyboard even while a pad is connected.
+    bool pad = !getenv("LARECOMP_KBD_KEYBOARD") && !g_kbd_chat.load() && (g_last_pad.load() || SDL_HasGamepad()),
+         appearing = !was_open || pad != was_pad;
     was_open = true, was_pad = pad;
     if (!pad) {  // keyboard: type straight into the field
         if (appearing) ImGui::SetKeyboardFocusHere();
