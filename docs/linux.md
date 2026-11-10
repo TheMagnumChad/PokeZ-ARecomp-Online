@@ -41,7 +41,7 @@ feature bits is enabled, but extended dynamic state 1 is **core** in Vulkan 1.3 
 without enabling the promoted extension's feature struct. Mesa 26.2.6 did not have the gating, so it worked.
 
 The renderer works around this by enabling the promoted `VK_EXT_extended_dynamic_state` extension and its feature bit
-on Vulkan 1.3 devices too; the commands remain the core ones. This is legal and makes RADV initialize the cache.
+on RADV Vulkan 1.3 devices too; the commands remain the core ones. This is legal and makes RADV initialize the cache. Other 1.3 drivers keep their previous feature chain.
 Mesa 26.2.6 and current mesa-git both run the game. The correct driver-side fix is to initialize `ps_epilogs`
 unconditionally (or for `VK_API_VERSION_1_3`); a local build with that change runs the original binary too.
 

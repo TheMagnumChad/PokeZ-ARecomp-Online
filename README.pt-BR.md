@@ -279,7 +279,7 @@ renderizador no driver **DirectX 12** da placa, o que ajuda quando o driver Vulk
   `libvulkan_radeon` no primeiro desenho do jogo porque o RADV 27 só inicializava o cache de epilogs do PS quando um
   bit de extensão de estado dinâmico estava ligado; no Vulkan 1.3 o estado dinâmico estendido 1 é do núcleo, então
   nenhum bit era ligado. O renderizador agora ativa o recurso promovido `VK_EXT_extended_dynamic_state` também em
-  dispositivos 1.3, o que faz o RADV inicializar o cache. Mesa 26.2.6 (estável) e o mesa-git atual funcionam; não é
+  dispositivos RADV 1.3, o que faz o RADV inicializar o cache. Mesa 26.2.6 (estável) e o mesa-git atual funcionam; não é
   preciso voltar para o driver estável. Veja [docs/linux.md](docs/linux.md#amd-rdna4-and-mesa-270-devel).
 - **Fps baixo**: diminua a resolução interna ou ligue a resolução Dinâmica, e desligue os recursos gráficos opcionais.
 - **Relatar um bug**: [abra uma issue](https://github.com/Hexveil404/PokeZ-ARecomp/issues) com a sua GPU, a versão do
