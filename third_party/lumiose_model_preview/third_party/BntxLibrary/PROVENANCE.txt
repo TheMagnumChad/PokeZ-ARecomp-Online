@@ -1,0 +1,4 @@
+Upstream: https://github.com/KillzXGaming/BntxLibrary
+Revision: 712162c165ed2bd783fe5287a7723f856be19342
+License: MIT, retained in LICENSE. Local change: BntxFile.CalculateHash hashes ImageData.ToArray() rather than passing Memory<byte> to Marshal.SizeOf through generic hashing. This fixes an observed load exception; no binary data or model assets are embedded.
+No game data or assets included.

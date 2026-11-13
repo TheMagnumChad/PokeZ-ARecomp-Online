@@ -1,0 +1,2 @@
+# Preserve audited renderer corresponding-source bytes and manifest hashes.
+third_party/lumiose_model_preview/** -text

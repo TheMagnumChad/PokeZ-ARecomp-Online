@@ -543,7 +543,7 @@ static _Atomic uint64_t touch_active, touch_pending, touch_sampling;
 static SDL_Window *touch_window;
 #define TOUCH_VALID (1ull << 63)
 static bool mouse_touch_enabled(void) {
-    return pad != NULL || keys_down[SDL_SCANCODE_LALT] || getenv("LUMIOSE_MOUSE_TOUCH_TEST") != NULL;
+    return pad != NULL || g_settings.mouse_camera != MOUSE_CAM_CAPTURED || lumiose_scroll_menu_open() || keys_down[SDL_SCANCODE_LALT] || getenv("LUMIOSE_MOUSE_TOUCH_TEST") != NULL;
 }
 static uint64_t touch_position(float x, float y) {
     int w = 0, h = 0;
@@ -577,7 +577,7 @@ void input_mouse_update(SDL_Window *w) {
     }
     bool want = g_settings.mouse_camera == MOUSE_CAM_CAPTURED && !menu_cursor_needed() && !input_user_blocked_any() &&
                 !mouse_touch_enabled() && (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS);
-    if (!want && keys_down[SDL_SCANCODE_LALT] && (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS)) {
+    if (!want && (keys_down[SDL_SCANCODE_LALT] || lumiose_scroll_menu_open()) && (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS)) {
         SDL_ShowCursor(); cursor_hidden = false;
     }
     if (want == mouse_held) return;

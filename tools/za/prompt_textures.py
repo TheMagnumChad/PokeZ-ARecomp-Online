@@ -290,7 +290,7 @@ if args.party_icons:
                     wb, hb = (w + 3) // 4, (h + 3) // 4
                     raw = texture2ddecoder.decode_bc7(deswizzle_np(data, wb, hb, 16, bh), wb * 4, hb * 4)
                     im = Image.frombytes('RGBA', (wb * 4, hb * 4), raw, 'raw', 'BGRA').crop((0, 0, w, h))
-                    im.resize((96, 96), Image.LANCZOS).save(os.path.join(args.party_icons, name + '.png'))
+                    im.resize((160, 160), Image.LANCZOS).save(os.path.join(args.party_icons, name + '.png'))
                     made += 1
     print('party icons:', made, flush=True)
     if made:

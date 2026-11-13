@@ -6,6 +6,7 @@
 
 #include "hle.h"
 #include "kernel.h"
+#include "lumiose_native_profile.h"
 #ifdef _WIN32
 #include "platform/windows_threads.h"
 #endif
@@ -434,6 +435,26 @@ uint64_t lumiose_camera_find(uint64_t start, uint64_t end) {
         p++;
     }
     return 0;
+}
+
+// Native mod ABI: never scan outside an allocated readable CPU memory region.
+// Hold the map lock throughout scanning so an unmap cannot race the native read.
+HLE_FUNC("vmp_recomp_camera_find", lumiose_native_camera_find) {
+    uint64_t start = c->x[0], end = c->x[1], result = 0;
+    if (!lumiose_native_caller(c->x[30]) || (start & 15) ||
+        start < GUEST_LO || end > GUEST_HI || end <= start || end - start < 0xc0) {
+        c->x[0] = 0; return;
+    }
+    pthread_mutex_lock(&g_mlock);
+    uint64_t info[5];
+    query_memory(start, (uint64_t)(uintptr_t)info);
+    lumiose_camera_memory(start, (uint64_t)(uintptr_t)info);
+    if (info[0] <= start && info[1] >= end - info[0] &&
+        (uint32_t)info[2] == 5 && !(info[2] >> 32 & 4) && !info[4] &&
+        (info[3] & 3) == 3)
+        result = lumiose_camera_find(start, end);
+    pthread_mutex_unlock(&g_mlock);
+    c->x[0] = result;
 }
 
 // ------------------------------------------------------------------ threads
@@ -974,7 +995,8 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         pthread_mutex_lock(&g_mlock);
         query_memory(x[2], x[0]);
         if (g_nmodules > 2 && pc >= g_modules[2].base && pc < g_modules[2].base + g_modules[2].text_size &&
-            (x[30] == g_modules[2].base + 0x15248 || x[30] == g_modules[2].base + 0x152f0)) {
+            ((x[30] == g_modules[2].base + 0x15248 || x[30] == g_modules[2].base + 0x152f0) ||
+             lumiose_native_camera_query(x[30]))) {
             lumiose_camera_memory(x[2], x[0]);
             if (ENV("LUMIOSE_LOG_CAMERA_MEMORY")) {
                 static int nlog;

@@ -23,12 +23,14 @@
 // .bfttf is the console's obfuscated TTF: 8-byte header (magic, size) then every u32 XORed with a fixed key (bfttf_decode).
 // .ttc collections get face 0 copied out as a standalone font (the game's font engine wants one sfnt).
 #include <stdlib.h>
+#include <SDL3/SDL_timer.h>
 #include <string.h>
 #include <strings.h>
 
 #include "../hle.h"
 #include "../settings.h"
 #include <SDL3/SDL_gamepad.h>
+#include <SDL3/SDL_filesystem.h>
 #include "../paths.h"
 
 // macOS and Windows have system fonts known to work well (Hiragino / Yu Gothic): the OS's fonts first, untouched.
@@ -38,6 +40,8 @@
 #else
 #define OS_FONTS_KNOWN 0
 #endif
+
+#include "lumiose_ui_atlas.h"
 
 typedef struct { uint64_t addr, size; } Font;
 // SharedFontType: 0 Standard, 1 ChineseSimple, 2 ChineseSimpleExt, 3 ChineseTraditional, 4 Korean, 5 NintendoExt
@@ -183,8 +187,56 @@ static void match_switch_metrics(uint8_t *d, size_t len) {
     os2[76] = (uint8_t)(desc >> 8), os2[77] = (uint8_t)desc;  // usWinDescent
 }
 
+#define LUMIOSE_UI_FONT_TYPE 0x4c554d49ull
+#define LUMIOSE_UI_ATLAS_TYPE 0x4c554d4aull
+#define LUMIOSE_UI_ITEM_TYPE 0x4c560000ull
+#define LUMIOSE_UI_MON_TYPE 0x4c570000ull
+#define LUMIOSE_UI_TEST_ANIM_TYPE 0x4c580000ull
+#include "lumiose_model_protocol.h"
+#define LUMIOSE_UI_MODEL_V2_TYPE LUMIOSE_MODEL_V2_TYPE
+#define LUMIOSE_UI_MODEL_V2_CAPABILITY LUMIOSE_MODEL_V2_CAPABILITY
+#define LUMIOSE_UI_MARKET_PREF_TYPE 0x4c590000ull
+static Font lumiose_ui_font;
+static int lumiose_ui_font_tried;
+static Font lumiose_ui_atlas;
+static int lumiose_ui_atlas_tried;
+static Font lumiose_ui_item;
+static unsigned lumiose_ui_item_id;
+static bool lumiose_ui_item_tried;
+static Font lumiose_ui_mon;
+static unsigned lumiose_ui_mon_cell;
+static bool lumiose_ui_mon_tried;
+static int lumiose_ui_market_animated = -1;
+static Font lumiose_ui_test_anim;
+static unsigned lumiose_ui_test_anim_cell;
+static bool lumiose_ui_test_anim_requested;
+static unsigned lumiose_ui_test_anim_logged = ~0u;
+static Font lumiose_ui_market_pref;
+static Font lumiose_ui_model_v2;
+static unsigned lumiose_ui_model_v2_key;
+static bool lumiose_ui_model_v2_requested;
+// Never reset the nonce on an in-place reboot; old session files must not match.
+static uint64_t lumiose_ui_model_v2_nonce;
+static uint64_t lumiose_ui_model_v2_started;
+
 static int load_one_checked(const char *path, Font *ft, bool check);
 static int load_one(const char *path, Font *ft) { return load_one_checked(path, ft, false); }
+static int load_lumiose_ui_font(const char *path, Font *ft) {
+    size_t len = 0;
+    uint8_t *data = read_file(path, &len);
+    if (!data) return 0;
+    const bool sfnt = len >= 1040 && len <= 0x600000 &&
+        (!memcmp(data, "OTTO", 4) || !memcmp(data, "\0\1\0\0", 4));
+    if (!sfnt) { free(data); return 0; }
+    void *mem = hle_alloc(len + 16);
+    if (!mem) { free(data); return 0; }
+    memcpy(mem, data, len);
+    free(data);
+    ft->addr = (uint64_t)mem;
+    ft->size = len;
+    LOG("[pl] loaded game UI font (%zu bytes)\n", len);
+    return 1;
+}
 static int load_one_checked(const char *path, Font *ft, bool check) {
     size_t len;
     uint8_t *d = read_file(path, &len);
@@ -218,7 +270,18 @@ static int load_one_checked(const char *path, Font *ft, bool check) {
 }
 
 static int g_fonts_loaded;
-RT_ON_RESET(pl_reset) { g_fonts_loaded = 0; memset(fonts, 0, sizeof fonts); }  // (they were in the HLE heap)
+RT_ON_RESET(pl_reset) {
+    g_fonts_loaded = 0; memset(fonts, 0, sizeof fonts);
+    memset(&lumiose_ui_font, 0, sizeof lumiose_ui_font); lumiose_ui_font_tried = 0;
+    memset(&lumiose_ui_atlas, 0, sizeof lumiose_ui_atlas); lumiose_ui_atlas_tried = 0;
+    memset(&lumiose_ui_item, 0, sizeof lumiose_ui_item); lumiose_ui_item_tried = false; lumiose_ui_item_id = 0;
+    memset(&lumiose_ui_mon, 0, sizeof lumiose_ui_mon); lumiose_ui_mon_tried = false; lumiose_ui_mon_cell = 0;
+    memset(&lumiose_ui_test_anim, 0, sizeof lumiose_ui_test_anim);
+    memset(&lumiose_ui_model_v2, 0, sizeof lumiose_ui_model_v2);
+    lumiose_ui_model_v2_requested = false;
+    lumiose_ui_test_anim_cell = 0; lumiose_ui_test_anim_requested = false; lumiose_ui_test_anim_logged = ~0u;
+    memset(&lumiose_ui_market_pref, 0, sizeof lumiose_ui_market_pref); lumiose_ui_market_animated = -1;
+}  // (they were in the HLE heap)
 
 const char *pl_prompt_set(void);  // (below: the button prompt set)
 
@@ -320,8 +383,245 @@ const char *pl_prompt_set(void) {
 }
 
 // SharedFontType: 0 Standard, 1 ChineseSimple, 2 ChineseSimpleExt, 3 ChineseTraditional, 4 Korean, 5 NintendoExt
+// Full-identity model requests do not reverse-map ambiguous atlas cells.
+static const Font *lumiose_model_v2(uint64_t type) {
+    lumiose_ui_model_v2.size = 0;
+    LumioseModelIdentity identity;
+    if (!lumiose_model_decode(type, &identity)) return &lumiose_ui_model_v2;
+    const unsigned key = identity.key, species = identity.species, form = identity.form;
+    const unsigned gender = identity.gender, shiny = identity.shiny;
+    const int model = lumiose_icon_model(species);
+    const char *root = getenv("LUMIOSE_UI_MODEL_ROOT");
+    if (model < 0 || !root || !*root) return &lumiose_ui_model_v2;
+    char path[4096], pending[4096], marker[64] = {0};
+    int n = snprintf(path, sizeof path, "%s/ready.txt", root);
+    if (n < 0 || (size_t)n >= sizeof path) return &lumiose_ui_model_v2;
+    FILE *f = fopen(path, "rb");
+    if (!f) return &lumiose_ui_model_v2;
+    bool capable = fgets(marker, sizeof marker, f) != NULL;
+    marker[strcspn(marker, "\r\n")] = 0;
+    capable = capable && !strcmp(marker, "model-preview-v2");
+    fclose(f);
+    if (!capable) return &lumiose_ui_model_v2;
+    if (!lumiose_ui_model_v2_requested || lumiose_ui_model_v2_key != key) {
+        if (lumiose_ui_model_v2_nonce == UINT64_MAX) return &lumiose_ui_model_v2;
+        ++lumiose_ui_model_v2_nonce;
+        int a = snprintf(path, sizeof path, "%s/request.txt", root);
+        int b = snprintf(pending, sizeof pending, "%s/request.pending", root);
+        if (a < 0 || b < 0 || (size_t)a >= sizeof path || (size_t)b >= sizeof pending) return &lumiose_ui_model_v2;
+        f = fopen(pending, "wb");
+        bool ok = f && fprintf(f, "v2 %u %llu %d %u %u %u\n", key,
+            (unsigned long long)lumiose_ui_model_v2_nonce, model, form, gender, shiny) > 0;
+        if (f && fclose(f)) ok = false;
+        if (ok) ok = SDL_RenamePath(pending, path);
+        if (!ok) { SDL_RemovePath(pending); return &lumiose_ui_model_v2; }
+        lumiose_ui_model_v2_requested = true;
+        lumiose_ui_model_v2_key = key;
+        lumiose_ui_model_v2_started = SDL_GetTicks();
+        lumiose_ui_test_anim_requested = false;
+        LOG("[pl] model v2 species %u model %d form %u gender %u shiny %u nonce %llu\n",
+            species, model, form, gender, shiny, (unsigned long long)lumiose_ui_model_v2_nonce);
+    }
+    // A bounded loading period cannot leave an unavailable model blank forever.
+    lumiose_ui_model_v2.size = SDL_GetTicks() - lumiose_ui_model_v2_started < 60000 ? 1 : 0;
+    n = snprintf(path, sizeof path, "%s/v2-%u/status.txt", root, key);
+    if (n < 0 || (size_t)n >= sizeof path) return &lumiose_ui_model_v2;
+    f = fopen(path, "rb");
+    if (!f) return &lumiose_ui_model_v2;
+    unsigned status_key = 0; unsigned long long nonce = 0; char status[16] = {0};
+    int count = fscanf(f, "%u %llu %15s", &status_key, &nonce, status); fclose(f);
+    if (count != 3 || status_key != key || nonce != lumiose_ui_model_v2_nonce) return &lumiose_ui_model_v2;
+    if (!strcmp(status, "error")) { lumiose_ui_model_v2.size = 0; return &lumiose_ui_model_v2; }
+    if (strcmp(status, "ready")) return &lumiose_ui_model_v2;
+    n = snprintf(path, sizeof path, "%s/v2-%u/frame.rgba", root, key);
+    if (n < 0 || (size_t)n >= sizeof path) return &lumiose_ui_model_v2;
+    const size_t length = 192u * 192u * 4u;
+    uint8_t *data = malloc(length);
+    f = data ? fopen(path, "rb") : NULL;
+    bool complete = f && fread(data, 1, length, f) == length && fgetc(f) == EOF;
+    if (f) fclose(f);
+    if (complete) {
+        if (!lumiose_ui_model_v2.addr) lumiose_ui_model_v2.addr = (uint64_t)hle_alloc(length);
+        if (lumiose_ui_model_v2.addr) {
+            memcpy((void *)(uintptr_t)lumiose_ui_model_v2.addr, data, length);
+            lumiose_ui_model_v2.size = length;
+        }
+    }
+    free(data);
+    return &lumiose_ui_model_v2;
+}
+
 static const Font *font_for(uint64_t type) {
+    if (type == LUMIOSE_UI_MODEL_V2_TYPE) {
+        static const Font capability = {.addr = 0, .size = LUMIOSE_UI_MODEL_V2_CAPABILITY};
+        return &capability;
+    }
+    if ((type & 0xff000000ull) == LUMIOSE_UI_MODEL_V2_TYPE) return lumiose_model_v2(type);
     load_fonts();
+    if ((type & 0xffffff00ull) == LUMIOSE_UI_MARKET_PREF_TYPE) {
+        char path[4096], temp[4096];
+        const char *root = rt_data_root();
+        int n = root ? snprintf(path, sizeof path, "%s/lumiose-market-cards.txt", root) : -1;
+        bool valid_path = n >= 0 && (size_t)n < sizeof path;
+        if (lumiose_ui_market_animated < 0) {
+            lumiose_ui_market_animated = 0;
+            FILE *in = valid_path ? fopen(path, "rb") : NULL;
+            if (in) { int c = fgetc(in); if (c == '1') lumiose_ui_market_animated = 1; fclose(in); }
+        }
+        unsigned action = (unsigned)(type & 0xffu);
+        if (action == 1 || action == 2) {
+            lumiose_ui_market_animated = action == 2;
+            n = valid_path ? snprintf(temp, sizeof temp, "%s.tmp", path) : -1;
+            if (n >= 0 && (size_t)n < sizeof temp) {
+                FILE *out = fopen(temp, "wb");
+                bool ok = out && fputs(lumiose_ui_market_animated ? "1\n" : "0\n", out) >= 0;
+                if (out && fclose(out) != 0) ok = false;
+                if (ok) ok = SDL_RenamePath(temp, path);
+                if (!ok) { SDL_RemovePath(temp); LOG("[pl] could not save market-card preference\n"); }
+            }
+        }
+        lumiose_ui_market_pref.size = lumiose_ui_market_animated ? 2 : 1;
+        return &lumiose_ui_market_pref;
+    }
+    // Local renderer service; no model or texture assets are distributed.
+    if ((type & 0xffff0000ull) == LUMIOSE_UI_TEST_ANIM_TYPE) {
+        const char *path = NULL;
+        const char *root = getenv("LUMIOSE_UI_MODEL_ROOT");
+        char ready_path[4096];
+        if (root && *root) {
+            const int n = snprintf(ready_path, sizeof ready_path, "%s/ready.txt", root);
+            FILE *ready = n >= 0 && (size_t)n < sizeof ready_path ? fopen(ready_path, "rb") : NULL;
+            if (ready) fclose(ready); else root = NULL;
+        }
+        const unsigned cell = (unsigned)(type & 0xffffu);
+        char path_buffer[4096];
+        if (cell == 0xffffu) {
+            if (root && *root && (lumiose_ui_test_anim_requested || lumiose_ui_model_v2_requested)) {
+                const int n = snprintf(path_buffer, sizeof path_buffer, "%s/request.txt", root);
+                if (n >= 0 && (size_t)n < sizeof path_buffer) {
+                    FILE *request = fopen(path_buffer, "wb");
+                    if (request) fclose(request);
+                }
+                LOG("[pl] animated model preview stopped\n");
+            }
+            lumiose_ui_test_anim_requested = false;
+            lumiose_ui_model_v2_requested = false; lumiose_ui_model_v2.size = 0;
+            lumiose_ui_test_anim_logged = ~0u;
+            lumiose_ui_test_anim.size = 0;
+            return &lumiose_ui_test_anim;
+        }
+        if (root && *root) {
+            if (!lumiose_ui_test_anim_requested || lumiose_ui_test_anim_cell != cell) {
+                lumiose_ui_test_anim_requested = true;
+                lumiose_ui_test_anim_cell = cell;
+                lumiose_ui_test_anim.size = 0;
+                int model = -1;
+                unsigned form = 0;
+                for (uint32_t i = 0; i < kIconIndexCount; ++i) {
+                    const struct IconIndex *entry = &kIconIndex[i];
+                    if (entry->cell != (cell & 0x7fffu)) continue;
+                    model = lumiose_icon_model(entry->species);
+                    form = entry->form;
+                    break;
+                }
+                const int n = snprintf(path_buffer, sizeof path_buffer, "%s/request.txt", root);
+                if (n >= 0 && (size_t)n < sizeof path_buffer) {
+                    FILE *request = fopen(path_buffer, "wb");
+                    if (request) { if (model >= 0) fprintf(request, "%u %d %u %u\n", cell, model, form, (cell & 0x8000u) != 0); fclose(request); }
+                }
+                // One byte denotes a valid selection whose model is loading.
+                if (model >= 0) lumiose_ui_test_anim.size = 1;
+                LOG("[pl] animated model request: cell %u model %d form %u\n", cell, model, form);
+            }
+            const int n = snprintf(path_buffer, sizeof path_buffer, "%s/cell-%u/frame.rgba", root, cell);
+            path = n >= 0 && (size_t)n < sizeof path_buffer ? path_buffer : NULL;
+        } else if (cell != 0) path = NULL;
+        if (path) {
+            size_t length = 0;
+            uint8_t *data = read_file(path, &length);
+            if (data && length == 192u * 192u * 4u) {
+                if (!lumiose_ui_test_anim.addr) lumiose_ui_test_anim.addr = (uint64_t)hle_alloc(length);
+                if (lumiose_ui_test_anim.addr) {
+                    memcpy((void *)(uintptr_t)lumiose_ui_test_anim.addr, data, length);
+                    lumiose_ui_test_anim.size = length;
+                    if (root && lumiose_ui_test_anim_logged != cell) {
+                        LOG("[pl] animated model frame loaded for cell %u\n", cell);
+                        lumiose_ui_test_anim_logged = cell;
+                    }
+                }
+            }
+            free(data);
+        } else lumiose_ui_test_anim.size = 0;
+        return &lumiose_ui_test_anim;
+    }
+    if ((type & 0xffff0000ull) == LUMIOSE_UI_MON_TYPE) {
+        const unsigned cell = (unsigned)(type & 0xffffu);
+        if (!lumiose_ui_mon_tried || lumiose_ui_mon_cell != cell) {
+            lumiose_ui_mon_tried = true;
+            lumiose_ui_mon_cell = cell;
+            lumiose_ui_mon.size = 0;
+            SDL_Surface *image = lumiose_build_mon_detail(getenv("LUMIOSE_UI_ICONS"), cell & 0x7fffu, (cell & 0x8000u) != 0);
+            if (image) {
+                if (!lumiose_ui_mon.addr) lumiose_ui_mon.addr = (uint64_t)hle_alloc(160 * 160 * 4);
+                if (lumiose_ui_mon.addr) {
+                    for (int y = 0; y < 160; ++y)
+                        memcpy((void *)(uintptr_t)(lumiose_ui_mon.addr + (uint64_t)y * 160 * 4),
+                               (const uint8_t *)image->pixels + (size_t)y * image->pitch, 160 * 4);
+                    lumiose_ui_mon.size = 160 * 160 * 4;
+                }
+                SDL_DestroySurface(image);
+            }
+        }
+        return &lumiose_ui_mon;
+    }
+    if ((type & 0xffff0000ull) == LUMIOSE_UI_ITEM_TYPE) {
+        const unsigned item = (unsigned)(type & 0xffffu);
+        if (!lumiose_ui_item_tried || lumiose_ui_item_id != item) {
+            lumiose_ui_item_tried = true;
+            lumiose_ui_item_id = item;
+            lumiose_ui_item.size = 0;
+            SDL_Surface *image = lumiose_build_item_detail(getenv("LUMIOSE_UI_ICONS"), item);
+            if (image) {
+                if (!lumiose_ui_item.addr) lumiose_ui_item.addr = (uint64_t)hle_alloc(160 * 160 * 4);
+                if (lumiose_ui_item.addr) {
+                for (int y = 0; y < 160; ++y)
+                    memcpy((void *)(uintptr_t)(lumiose_ui_item.addr + (uint64_t)y * 160 * 4),
+                           (const uint8_t *)image->pixels + (size_t)y * image->pitch, 160 * 4);
+                lumiose_ui_item.size = 160 * 160 * 4;
+                }
+                SDL_DestroySurface(image);
+            }
+        }
+        return &lumiose_ui_item;
+    }
+    if (type == LUMIOSE_UI_ATLAS_TYPE) {
+        if (!lumiose_ui_atlas_tried) {
+            lumiose_ui_atlas_tried = 1;
+            SDL_Surface *atlas = lumiose_build_icon_atlas(getenv("LUMIOSE_UI_ICONS"));
+            if (atlas) {
+                const size_t row = (size_t)atlas->w * 4, len = row * (size_t)atlas->h;
+                uint8_t *mem = hle_alloc(len);
+                if (mem) {
+                for (int y = 0; y < atlas->h; ++y)
+                    memcpy(mem + (size_t)y * row, (const uint8_t *)atlas->pixels + (size_t)y * atlas->pitch, row);
+                lumiose_ui_atlas.addr = (uint64_t)mem;
+                lumiose_ui_atlas.size = len;
+                }
+                SDL_DestroySurface(atlas);
+                LOG("[pl] loaded game-derived UI icon atlas (%zu bytes)\n", len);
+            }
+        }
+        return &lumiose_ui_atlas;
+    }
+    if (type == LUMIOSE_UI_FONT_TYPE) {
+        if (!lumiose_ui_font_tried) {
+            lumiose_ui_font_tried = 1;
+            const char *path = getenv("LUMIOSE_UI_FONT");
+            if (path && *path) load_lumiose_ui_font(path, &lumiose_ui_font);
+        }
+        return lumiose_ui_font.addr ? &lumiose_ui_font : &fonts[F_STD];
+    }
+
     // a type this OS gave us no font for (a Linux without a CJK font, say): Standard, as a missing dump does too
     if (type >= N_FONT_TYPES || !fonts[type].addr) return &fonts[F_STD];
     return &fonts[type];

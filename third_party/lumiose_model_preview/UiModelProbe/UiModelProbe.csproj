@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows7.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="OpenTK.GLControl" Version="4.0.1" />
+    <ProjectReference Include="..\GFTool.Renderer\GFTool.Renderer.csproj" />
+  </ItemGroup>
+  <ItemGroup><Compile Remove="AnimationFramingChecks.cs" /></ItemGroup>
+</Project>

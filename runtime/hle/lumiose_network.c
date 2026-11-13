@@ -16,6 +16,7 @@ typedef int SOCKET;
 #include <pthread.h>
 #include <stdatomic.h>
 #include "../hle.h"
+#include "../lumiose_native_profile.h"
 
 enum { LUMIOSE_MAX_SOCKETS = 64 };
 static SOCKET sockets[LUMIOSE_MAX_SOCKETS];
@@ -25,6 +26,11 @@ static _Atomic bool trainer_name_ready;
 
 // Called after Lumiose reads the actual name from a loaded trainer save.
 void lumiose_mark_trainer_ready(void) { atomic_store(&trainer_name_ready, true); }
+HLE_FUNC("vmp_recomp_name_ready", lumiose_native_name_ready) {
+    if (lumiose_native_caller(c->x[30])) lumiose_mark_trainer_ready();
+    c->x[0] = 0;
+}
+
 
 static bool net_start(void) {
     if (!started) {

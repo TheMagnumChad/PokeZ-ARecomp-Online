@@ -1,0 +1,28 @@
+name: Linux UI compatibility overlay (Icons only)
+on:
+  workflow_dispatch:
+  push:
+    branches: [pokemon-za]
+    paths: ['.github/workflows/lumiose-linux-ui-update.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned native Linux environment
+        run: docker build -t lumiose-linux-ui -f tools/linux/Containerfile tools/linux
+      - name: Build runtime and local extraction helpers without game inputs
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src lumiose-linux-ui bash -euo pipefail -c '
+            git config --global --add safe.directory /src
+            apt-get update -qq
+            apt-get install -y --no-install-recommends python3-venv
+            JOBS=4 bash tools/linux/build_ui_update.sh'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lumiose-Online-linux-experimental
+          path: build/dist/Lumiose-Online-linux-experimental.zip
+          if-no-files-found: error

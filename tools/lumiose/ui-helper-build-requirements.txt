@@ -1,0 +1,8 @@
+# Validated private Windows helper build inputs; record wheel hashes when installing.
+PyInstaller==6.16.0
+pyinstaller-hooks-contrib==2026.9
+Pillow==13.0.0
+fonttools==4.68.0
+texture2ddecoder==1.0.6
+cffsubr==0.4.0
+numpy==2.5.4

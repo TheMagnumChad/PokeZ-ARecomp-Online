@@ -60,6 +60,7 @@ extern int g_game_is_la;  // it is Link's Awakening: the fixed-address hooks of 
 // ---- loader.c
 typedef struct Module {
     const char *name;
+    uint8_t build_id[32];  // NSO identity, retained for fail-closed native compatibility profiles
     uint64_t base, size;
     uint64_t text_off, text_size, ro_off, ro_size, data_off, data_size;
     uint64_t dynamic, init, fini, init_array, init_array_sz, fini_array, fini_array_sz;

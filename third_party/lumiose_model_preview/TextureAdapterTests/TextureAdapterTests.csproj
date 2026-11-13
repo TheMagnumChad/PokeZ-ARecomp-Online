@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="OpenTK.Graphics" Version="4.8.2" />
+    <ProjectReference Include="../third_party/BntxLibrary/BntxLibrary/BntxLibrary.csproj" />
+    <Compile Include="../GFTool.Renderer/Scene/GraphicsObjects/LocalBntxTexture.cs" Link="LocalBntxTexture.cs" />
+  </ItemGroup>
+</Project>

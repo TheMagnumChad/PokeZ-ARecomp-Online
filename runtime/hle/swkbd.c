@@ -72,7 +72,12 @@ void lumiose_keyboard_debug(const char *s, size_t n) {
         {"[ui] market opened", 2, 1, true}, {"[ui] market closed", 0, 1, false},
         {"[ui] mailbox opened", 3, 2, true}, {"[ui] mailbox closed", 0, 2, false},
         {"[ui] friends window opened", -1, 4, true}, {"[ui] friends window closed", -1, 4, false},
-        {"[ui] player list opened", -1, 8, true}, {"[ui] player list closed", -1, 8, false}
+        {"[ui] player list opened", -1, 8, true}, {"[ui] player list closed", -1, 8, false},
+        {"[ui] breeding opened", -1, 16, true}, {"[ui] breeding closed", -1, 16, false},
+        {"[ui] pokedex meters opened", -1, 32, true}, {"[ui] pokedex meters closed", -1, 32, false},
+        {"[ui] menu opened", -1, 64, true}, {"[ui] menu closed", -1, 64, false},
+        {"[ui] voice chat window opened", -1, 128, true}, {"[ui] voice chat window closed", -1, 128, false},
+        {"[ui] god mode window opened", -1, 256, true}, {"[ui] god mode window closed", -1, 256, false}
     };
     for (unsigned i = 0; i < sizeof markers / sizeof markers[0]; i++) {
         size_t len = strlen(markers[i].line);

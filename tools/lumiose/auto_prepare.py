@@ -4,6 +4,7 @@ This command operates only in --work; it never installs or changes a save.
 The reference is the verified 1.3.9 recomp module used to locate signatures.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,12 +30,112 @@ def unique(data, signature, description):
     return pos
 
 
+# A native-ABI profile is admitted only after binary, import relocations, call
+# sites, camera map queries and name-preservation semantics have been reviewed.
+# Unknown modules retain the strict legacy compatibility checks below.
+NATIVE_PROFILES = {'84684491199a6b9180725802558b75d9c0a0d0c4': {'camera_query_returns': [86704, 86816, 87040],
+                                              'name_preservation_verified': True,
+                                              'sha256': '90498556f83eb0f467bad29f1acc805ece178820842e7c63128ea8ecbae34781',
+                                              'witnesses': [(86688,
+                                                             'e20316aae10313aae00314aa5532059420020035e0bf40f9e00100b4e18741b9'),
+                                                            (86784,
+                                                             'e20315aae1030391e02303911c0080d21b0080d299b9e7f21600805239320594200700351f2003d5fa6b40f9da0600b4e0e340b9e26740f9000400125703028b'),
+                                                            (87020, 'f50317aae1030391e20315aae02303910132059440f9ff34'),
+                                                            (87816,
+                                                             'df3e0071e8010054403c009100ec7c92e10317aa75a30594e30300aa200100b43afdff97e103002a60400091e1000036'),
+                                                            (1448960, 'e10f1ff8c10000d4e20741f8410000b9c0035fd6'),
+                                                            (1565936, '301700f011be44f910e2259120021fd6'),
+                                                            (1566928, '301700f011b645f910a22d9120021fd6'),
+                                                            (256640,
+                                                             '602100b401004039020080d201210034e10000341f2003d5420400915f5c00f1800800540168623881ffff3502200034e303022aff4309d1e10300aa402600f000a02491fd7b00a9fd030091e18b01a9e31700f9ebbc0494e31740f9e18b41a9e01f0035402600f0044013918400038b84605139e41d003404401391853442f9'),
+                                                            (256800,
+                                                             '422600f08000038b23008052436012391f601139202100f0000c47f9400000b464ff0494402600f0'),
+                                                            (257712,
+                                                             '412600f022008052202100f0000c47f92260123900e7ffb4fd7b40a9ff43099180fe0414'),
+                                                            (258460,
+                                                             'a15a42f982625139012001ca811200f9620c0034402600d001a0249162421391e5909252e554bc72'),
+                                                            (259056,
+                                                             '25908d52230a00d063e02e91e4909252e454bc7225000079412600d0430000f9040000b920a064398000003420a02491400000f9c0035fd6200a00d000c02d91400000f9c0035fd6'),
+                                                            (1596272, '5265636f6d7000')]},
+ 'd2e94b5e81e6da075256b515952e75ed2103e32a': {'camera_query_returns': [86704, 86816, 87040],
+                                              'name_preservation_verified': True,
+                                              'sha256': '2d041c2a270bc5cf47947eecf1c4138907e6992c6b1847310586e2e7943ac2cd',
+                                              'witnesses': [(86688,
+                                                             'e20316aae10313aae00314aa3d32059420020035e0bf40f9e00100b4e18741b9'),
+                                                            (86784,
+                                                             'e20315aae1030391e02303911c0080d21b0080d299b9e7f21600805221320594200700351f2003d5fa6b40f9da0600b4e0e340b9e26740f9000400125703028b'),
+                                                            (87020, 'f50317aae1030391e20315aae0230391e931059440f9ff34'),
+                                                            (87816,
+                                                             'df3e0071e8010054403c009100ec7c92e10317aa55a30594e30300aa200100b43afdff97e103002a60400091e1000036'),
+                                                            (1448864, 'e10f1ff8c10000d4e20741f8410000b9c0035fd6'),
+                                                            (1565808, '301700f011be44f910e2259120021fd6'),
+                                                            (1566800, '301700f011b645f910a22d9120021fd6'),
+                                                            (256640,
+                                                             '602100b401004039020080d201210034e10000341f2003d5420400915f5c00f1800800540168623881ffff3502200034e303022aff4309d1e10300aa402600f000a02491fd7b00a9fd030091e18b01a9e31700f9cbbc0494e31740f9e18b41a9e01f0035402600f0044013918400038b84605139e41d003404401391853442f9'),
+                                                            (256800,
+                                                             '422600f08000038b23008052436012391f601139202100f0000c47f9400000b444ff0494402600f0'),
+                                                            (257712,
+                                                             '412600f022008052202100f0000c47f92260123900e7ffb4fd7b40a9ff43099160fe0414'),
+                                                            (258460,
+                                                             'a15a42f982625139012001ca811200f9620c0034402600d001a0249162421391e5909252e554bc72'),
+                                                            (259056,
+                                                             '25908d52230a00d063e02e91e4909252e454bc7225000079412600d0430000f9040000b920a064398000003420a02491400000f9c0035fd6200a00d000c02d91400000f9c0035fd6'),
+                                                            (1596272, '5265636f6d7000')]},
+ 'fed1e64fbb8479baa78e4f57afda7f468c7d4ad2': {'camera_query_returns': [86704, 86816, 87040],
+                                              'name_preservation_verified': True,
+                                              'sha256': '6094f9629785dfed5ffca5782565ddfdaf424c642804793cf1dac62af95c7a6a',
+                                              'witnesses': [(86688,
+                                                             'e20316aae10313aae00314aa5532059420020035e0bf40f9e00100b4e18741b9'),
+                                                            (86784,
+                                                             'e20315aae1030391e02303911c0080d21b0080d299b9e7f21600805239320594200700351f2003d5fa6b40f9da0600b4e0e340b9e26740f9000400125703028b'),
+                                                            (87020, 'f50317aae1030391e20315aae02303910132059440f9ff34'),
+                                                            (87816,
+                                                             'df3e0071e8010054403c009100ec7c92e10317aa75a30594e30300aa200100b43afdff97e103002a60400091e1000036'),
+                                                            (1448960, 'e10f1ff8c10000d4e20741f8410000b9c0035fd6'),
+                                                            (1565936, '301700f011be44f910e2259120021fd6'),
+                                                            (1566928, '301700f011b645f910a22d9120021fd6'),
+                                                            (256640,
+                                                             '602100b401004039020080d201210034e10000341f2003d5420400915f5c00f1800800540168623881ffff3502200034e303022aff4309d1e10300aa402600f000a02491fd7b00a9fd030091e18b01a9e31700f9ebbc0494e31740f9e18b41a9e01f0035402600f0044013918400038b84605139e41d003404401391853442f9'),
+                                                            (256800,
+                                                             '422600f08000038b23008052436012391f601139202100f0000c47f9400000b464ff0494402600f0'),
+                                                            (257712,
+                                                             '412600f022008052202100f0000c47f92260123900e7ffb4fd7b40a9ff43099180fe0414'),
+                                                            (258460,
+                                                             'a15a42f982625139012001ca811200f9620c0034402600d001a0249162421391e5909252e554bc72'),
+                                                            (259056,
+                                                             '25908d52230a00d063e02e91e4909252e454bc7225000079412600d0430000f9040000b920a064398000003420a02491400000f9c0035fd6200a00d000c02d91400000f9c0035fd6'),
+                                                            (1596272, '5265636f6d7000')]}}
+
+
+def native_profile(module, path):
+    profile = NATIVE_PROFILES.get(module.build_id)
+    if profile is None:
+        return None
+    if hashlib.sha256(Path(path).read_bytes()).hexdigest() != profile['sha256']:
+        raise RuntimeError('Native compatibility module hash mismatch')
+    for name in ('vmp_recomp_camera_find', 'vmp_recomp_name_ready'):
+        indices = [i for i, sym in enumerate(module.syms) if sym[0] == name and sym[2] == 0]
+        if len(indices) != 1:
+            raise RuntimeError('Native compatibility import missing or ambiguous: ' + name)
+        relocs = [r for r in module.relocs if r[2] == indices[0] and r[1] in (257, 1025, 1026)]
+        if not relocs or any(r[3] != 0 or r[0] < module.rodata[0] or r[0]+8 > len(module.image) for r in relocs):
+            raise RuntimeError('Native compatibility import relocation invalid: ' + name)
+    for offset, expected in profile['witnesses']:
+        signature = bytes.fromhex(expected)
+        if bytes(module.image[offset:offset+len(signature)]) != signature:
+            raise RuntimeError('Native compatibility call or name semantics changed')
+    if not profile.get('name_preservation_verified'):
+        raise RuntimeError('Native compatibility trainer-name preservation not verified')
+    return profile
+
+
 def tables_for(reference, candidate):
     old, new = Nso(str(reference)), Nso(str(candidate))
     if not old.build_id.startswith('96f2b142853fa151'):
         raise RuntimeError('The 1.3.9 compatibility reference is missing or incorrect')
     data = bytes(new.image)
-    for off in (0x15248, 0x152f0):
+    native = native_profile(new, candidate)
+    for off in (() if native else (0x15248, 0x152f0)):
         # The BL destination can move; the return address and surrounding
         # camera-query instructions must retain the same meaning.
         if (bytes(old.image[off - 12:off - 4]) != bytes(new.image[off - 12:off - 4]) or
@@ -85,7 +186,7 @@ def run(command, env, log):
         raise RuntimeError(f'Preparation failed (see {log})')
 
 
-def smoke_version(contents):
+def smoke_version(contents, expected_platform=2):
     """Validate a live title or HUD without requiring the player to enter the overworld."""
     if '[crash]' in contents or '*** exception' in contents or 'no function at ' in contents:
         raise RuntimeError('The isolated startup reported a crash')
@@ -100,7 +201,7 @@ def smoke_version(contents):
     version = re.search(r'\[update\] this build is (\d+)\.(\d+)\.(\d+) build (\d+) \(platform (\d+), channel (\d+)\)', contents)
     if not version:
         raise RuntimeError('The updated mod did not identify its version')
-    if int(version.group(5)) != 2:
+    if int(version.group(5)) != expected_platform:
         raise RuntimeError('The download is not the recomp version of Lumiose')
     return [int(x) for x in version.groups()[:4]]
 
@@ -145,7 +246,7 @@ def capture(exe, game, work, module, library, gamelib, build_id, *, snapshot, se
                         if snapshot and '[lumiose test] wrote local module snapshots' in contents:
                             return
                         if not snapshot:
-                            version = smoke_version(contents)
+                            version = smoke_version(contents, expected_platform=3 if build_id in NATIVE_PROFILES else 2)
                             if version is not None:
                                 return version
                     time.sleep(1)
@@ -161,6 +262,16 @@ def capture(exe, game, work, module, library, gamelib, build_id, *, snapshot, se
 
 
 def patch_generated(work, build_id):
+    if build_id in NATIVE_PROFILES:
+        source = Path(work) / 'input' / 'exefs' / 'subsdk9'
+        module = Nso(str(source))
+        if module.build_id != build_id or native_profile(module, source) is None:
+            raise RuntimeError('Native compatibility profile does not match generated input')
+        # This exact module preserves trainer names itself and calls the bound
+        # native scanner/readiness ABI. Applying legacy translated-body edits
+        # would corrupt changed register allocations and duplicate hooks.
+        print('Verified native camera/name compatibility profile', build_id, flush=True)
+        return
     root = work / 'generated' / 'lumiose'
     # Locate the name code from its structure, then verify every edit. Mod
     # updates routinely move functions and globals without changing semantics.
@@ -259,7 +370,11 @@ def main():
         run([py, str(ROOT / 'tools' / 'lumiose' / script)], env, a.work / (script + '.log'))
     from fast_retarget import current_cache, retarget, save_cache
     cache_root = a.game.parent / 'lumiose' / 'generation-cache'
-    cached = current_cache(cache_root)
+    # Optional existing cache is a read-only input. Retarget validates its
+    # fingerprints/hashes; new generated results still save only to cache_root.
+    readonly_cache = os.environ.get('LUMIOSE_READONLY_GENERATION_CACHE')
+    lookup_root = Path(readonly_cache).resolve() if readonly_cache else cache_root
+    cached = current_cache(lookup_root)
     if cached and retarget(cached, a.work):
         env['LUMIOSE_SKIP_GAME_GENERATION'] = '1'
     else:

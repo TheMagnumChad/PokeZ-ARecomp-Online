@@ -159,12 +159,56 @@ def launch(config_path, prepare_only=False):
                LUMIOSE_TEST_NETWORK='1', LUMIOSE_TEST_SERVER=cfg['server'],
                LARECOMP_DISABLE_OCCLUSION_CULLING='1',
                LUMIOSE_PREPARE_BUILD_ID=state['build_id'])
+    env.pop('LUMIOSE_UI_FONT', None)
+    env.pop('LUMIOSE_UI_ICONS', None)
+    env.pop('LUMIOSE_UI_MODEL_ROOT', None)
+    env.pop('LUMIOSE_UI_TEST_MODEL_ROOT', None)
+    env.pop('LUMIOSE_UI_TEST_MODEL_FRAME', None)
+    if not prepare_only:
+        try:
+            from game_ui_font import prepare as prepare_game_ui_font
+            font = prepare_game_ui_font(install, game, mod_dir / 'ui-assets')
+            if font is not None:
+                env['LUMIOSE_UI_FONT'] = str(font)
+        except Exception as exc:
+            # A changed archive or missing optional extractor must not prevent play.
+            print(f'Game UI font unavailable; using the system font: {exc}', flush=True)
+        try:
+            from game_ui_icons import prepare as prepare_game_ui_icons
+            icons = prepare_game_ui_icons(install, game, mod_dir / 'ui-assets')
+            if icons is not None:
+                env['LUMIOSE_UI_ICONS'] = str(icons)
+                try:
+                    from game_ui_items import prepare as prepare_game_ui_items
+                    prepare_game_ui_items(install, game, icons)
+                except Exception as exc:
+                    print(f'Game item pictures unavailable: {exc}', flush=True)
+        except Exception as exc:
+            print(f'Game UI icons unavailable: {exc}', flush=True)
     for key in ('LARECOMP_NO_LAUNCHER', 'LARECOMP_NO_UPDATE_CHECK', 'LARECOMP_HIDDEN', 'LUMIOSE_TEST_OFFLINE_CAPTURE',
                 'LUMIOSE_TEST_DUMP', 'LUMIOSE_TEST_DROP_FILE'):
         env.pop(key, None)
     if not prepare_only:
-        subprocess.Popen([str(install / EXECUTABLE), str(game)], cwd=str(install), env=env,
-                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        preview = None
+        try:
+            from model_preview_launcher import start as start_model_preview
+            preview = start_model_preview(install, game, mod_dir, env)
+        except Exception as exc:
+            print(f'Animated Pokémon preview unavailable: {exc}', flush=True)
+        try:
+            process = subprocess.Popen([str(install / EXECUTABLE), str(game)], cwd=str(install), env=env,
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except Exception:
+            if preview is not None:
+                preview.stop()
+            raise
+        if preview is not None:
+            try:
+                preview.attach(process.pid)
+            except OSError as exc:
+                preview.stop()
+                print(f'Animated Pokémon preview unavailable: {exc}', flush=True)
+        return process
 
 
 if __name__ == '__main__':

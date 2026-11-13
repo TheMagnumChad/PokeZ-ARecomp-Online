@@ -302,12 +302,13 @@ bool menu_handle_event(const SDL_Event *e) {
                     (bridge.state & LUMIOSE_CHAT_OTHER_WINDOW)) {
                     float cx = g_game_view_x + g_game_view_w * 0.5f, cy = g_game_view_y + g_game_view_h * 0.5f;
                     unsigned field_id = 0;
-                    if (bridge.focus_field == 2 && x >= cx - 784 * h && x < cx + 120 * h &&
-                        y >= cy - 318 * h && y < cy - 278 * h) field_id = 2;
-                    if (bridge.focus_field >= 7 && bridge.focus_field <= 9 && x >= cx - 560 * h && x < cx + 560 * h) {
-                        if (y >= cy - 294 * h && y < cy - 246 * h) field_id = 7;
-                        else if (y >= cy - 234 * h && y < cy - 186 * h) field_id = 8;
-                        else if (y >= cy - 174 * h && y < cy - 126 * h) field_id = 9;
+                    // Match the refreshed market search and mail compose rows in 1920x1080 layout space.
+                    if (bridge.focus_field == 2 && x >= cx - 896 * h && x < cx - 466 * h &&
+                        y >= cy - 300 * h && y < cy - 252 * h) field_id = 2;
+                    if (bridge.focus_field >= 7 && bridge.focus_field <= 9 && x >= cx - 750 * h && x < cx + 750 * h) {
+                        if (y >= cy - 282 * h && y < cy - 232 * h) field_id = 7;
+                        else if (y >= cy - 222 * h && y < cy - 172 * h) field_id = 8;
+                        else if (y >= cy - 162 * h && y < cy - 112 * h) field_id = 9;
                     }
                     if (field_id && lumiose_chat_native_window_click(field_id)) { native_click = true; return true; }
                 }

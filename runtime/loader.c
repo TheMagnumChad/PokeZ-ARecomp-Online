@@ -55,6 +55,7 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
     size_t len;
     uint8_t *raw = read_file(path, &len);
     if (!raw || memcmp(raw, "NSO0", 4)) FATAL("cannot load %s\n", path);
+    memcpy(m->build_id, raw + 0x40, sizeof m->build_id);
     uint32_t flags = *(uint32_t *)(raw + 0xC);
     uint32_t seg[3][3];  // file_off, mem_off, size
     for (int i = 0; i < 3; i++) memcpy(seg[i], raw + 0x10 + i * 0x10, 12);
