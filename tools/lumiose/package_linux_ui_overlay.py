@@ -3,6 +3,15 @@ import argparse, hashlib, json, os, stat, zipfile
 from pathlib import Path
 HELPERS = ('auto_launch.py', 'auto_prepare.py', 'build_module.py', 'build_patched_game.py', 'entry.py', 'fast_retarget.py', 'find_hook_entries.py', 'game_ui_font.py', 'game_ui_icons.py', 'game_ui_items.py', 'game_ui_model_catalog.py', 'game_ui_models.py', 'generate_patched.py', 'linux_launcher_update.py', 'model_preview_launcher.py', 'model_preview_service.py', 'optimize_camera_139.py', 'platform_paths.py', 'prepare_patched_modules.py', 'preserve_name_139.py', 'setup.py', 'switch_tables.py')
 FORBIDDEN = {'.nso','.nsp','.xci','.nca','.trmdl','.trmsh','.trmbf','.trskl','.trmtr','.tracm','.tranm','.bntx'}
+# pip includes Windows launchers for creating Windows console scripts. They are
+# unused by the Linux runtime; do not weaken the rejection of other PE files.
+WINDOWS_PIP_LAUNCHERS = {'t32.exe', 't64.exe', 't64-arm.exe', 'w32.exe', 'w64.exe', 'w64-arm.exe'}
+
+def windows_pip_launcher(relative):
+    parts = Path(relative).parts
+    return (len(parts) >= 4 and parts[-4:-1] == ('pip', '_vendor', 'distlib')
+            and parts[-1] in WINDOWS_PIP_LAUNCHERS)
+
 def package(root, build, output):
     root,build,output=map(Path,(root,build,output)); files={}
     def add(path,name):
@@ -24,7 +33,12 @@ def package(root, build, output):
     for source,prefix in ((build/'helper/zaprompts','usr/bin/zaprompts'),(build/'ui-python-deps','usr/bin/python-deps'),(build/'ui-runtime-libs','usr/lib'),(build/'ui-python','usr/bin/python')):
         if not source.is_dir():raise RuntimeError('Missing fresh build dependencies')
         for p in sorted(source.rglob('*')):
-            if p.is_file() and '__pycache__' not in p.parts and p.suffix!='.pyc':add(p,prefix+'/'+p.relative_to(source).as_posix())
+            if not p.is_file() or '__pycache__' in p.parts or p.suffix == '.pyc':
+                continue
+            relative = p.relative_to(source)
+            if windows_pip_launcher(relative):
+                continue
+            add(p, prefix + '/' + relative.as_posix())
     add(root/'LICENSE','usr/bin/docs/UI-UPDATE-LICENSE.txt')
     starter = "#!/bin/sh\nset -eu\nHERE=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexport LD_LIBRARY_PATH=\"$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\nexport PYTHONPATH=\"$HERE/usr/bin/python-deps${PYTHONPATH:+:$PYTHONPATH}\"\nexec \"$HERE/usr/bin/python/bin/python3.12\" \"$HERE/usr/bin/tools/lumiose/entry.py\" \"$@\"\n"
     files['Lumiose Online']=(starter.encode(),0o755)

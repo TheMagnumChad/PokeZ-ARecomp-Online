@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [pokemon-za]
-    paths: ['.github/workflows/lumiose-linux-ui-update.yml']
+    paths: ['.github/workflows/lumiose-linux-ui-update.yml', 'tools/lumiose/package_linux_ui_overlay.py', 'tools/lumiose/test_linux_ui_overlay.py']
 permissions:
   contents: read
 jobs:
@@ -22,6 +22,8 @@ jobs:
           if missing: raise SystemExit('Missing production helpers: ' + ', '.join(missing))
           print('Production helper allowlist complete:', len(HELPERS))
           PY
+      - name: Test Linux package exclusions
+        run: PYTHONPATH=tools/lumiose python3 -B tools/lumiose/test_linux_ui_overlay.py
       - name: Build pinned native Linux environment
         run: docker build -t lumiose-linux-ui -f tools/linux/Containerfile tools/linux
       - name: Build runtime and local extraction helpers without game inputs
