@@ -12,6 +12,16 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      - name: Check committed production helper allowlist
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          sys.path.insert(0, 'tools/lumiose')
+          from package_linux_ui_overlay import HELPERS
+          missing = [name for name in HELPERS if not (pathlib.Path('tools/lumiose') / name).is_file()]
+          if missing: raise SystemExit('Missing production helpers: ' + ', '.join(missing))
+          print('Production helper allowlist complete:', len(HELPERS))
+          PY
       - name: Build pinned native Linux environment
         run: docker build -t lumiose-linux-ui -f tools/linux/Containerfile tools/linux
       - name: Build runtime and local extraction helpers without game inputs

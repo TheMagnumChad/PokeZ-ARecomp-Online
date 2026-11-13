@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "discord_presence.h"
 #include "game_addresses.h"
 #include "gamelib.h"
 #include "paths.h"
@@ -442,7 +443,9 @@ int main(int argc, char **argv) {
             launcher_run(root);
         }
         boot(root);
+        if (!g_game_is_la) discord_presence_start();
         int kind = ui_run();  // window and input on the main thread; returns when a reboot is requested
+        discord_presence_stop();
         teardown();
         title = kind == RT_REBOOT_TITLE;
     }

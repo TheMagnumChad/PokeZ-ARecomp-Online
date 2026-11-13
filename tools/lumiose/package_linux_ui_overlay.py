@@ -1,7 +1,7 @@
 """Package fresh Linux build outputs as a existing-install UI update compatible with the Linux updater. No mod/game inputs."""
 import argparse, hashlib, json, os, stat, zipfile
 from pathlib import Path
-HELPERS = ('audit_model_coverage.py', 'auto_launch.py', 'auto_prepare.py', 'build_module.py', 'build_patched_game.py', 'entry.py', 'fast_retarget.py', 'find_hook_entries.py', 'game_ui_font.py', 'game_ui_icons.py', 'game_ui_items.py', 'game_ui_model_catalog.py', 'game_ui_models.py', 'generate_patched.py', 'linux_launcher_update.py', 'model_preview_launcher.py', 'model_preview_service.py', 'optimize_camera_139.py', 'platform_paths.py', 'prepare_patched_modules.py', 'preserve_name_139.py', 'setup.py', 'switch_tables.py')
+HELPERS = ('auto_launch.py', 'auto_prepare.py', 'build_module.py', 'build_patched_game.py', 'entry.py', 'fast_retarget.py', 'find_hook_entries.py', 'game_ui_font.py', 'game_ui_icons.py', 'game_ui_items.py', 'game_ui_model_catalog.py', 'game_ui_models.py', 'generate_patched.py', 'linux_launcher_update.py', 'model_preview_launcher.py', 'model_preview_service.py', 'optimize_camera_139.py', 'platform_paths.py', 'prepare_patched_modules.py', 'preserve_name_139.py', 'setup.py', 'switch_tables.py')
 FORBIDDEN = {'.nso','.nsp','.xci','.nca','.trmdl','.trmsh','.trmbf','.trskl','.trmtr','.tracm','.tranm','.bntx'}
 def package(root, build, output):
     root,build,output=map(Path,(root,build,output)); files={}
@@ -40,7 +40,7 @@ def package(root, build, output):
     output.parent.mkdir(parents=True,exist_ok=True)
     with zipfile.ZipFile(output,'w',zipfile.ZIP_DEFLATED) as z:
         for n,(data,mode) in sorted(files.items()):
-            info=zipfile.ZipInfo('Lumiose Online Linux/'+n);info.create_system=3;info.external_attr=(stat.S_IFREG|(mode&0o777))<<16;z.writestr(info,data)
+            info=zipfile.ZipInfo('Lumiose Online Linux/'+n);info.create_system=3;info.compress_type=zipfile.ZIP_DEFLATED;info.external_attr=(stat.S_IFREG|(mode&0o777))<<16;z.writestr(info,data)
     with zipfile.ZipFile(output) as z:
         for item in manifest['files']:assert hashlib.sha256(z.read('Lumiose Online Linux/'+item['path'])).hexdigest()==item['sha256']
     print(json.dumps({'archive':str(output),'sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'files':len(files)}))

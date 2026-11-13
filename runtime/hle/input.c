@@ -619,6 +619,15 @@ void input_mouse_release(SDL_Window *w) {
     LOG("[input] mouse free (start screen)\n");
 }
 void input_handle_event(const SDL_Event *e) {
+    if ((e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat) ||
+        e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_WHEEL ||
+        (e->type == SDL_EVENT_MOUSE_MOTION && (e->motion.xrel || e->motion.yrel)) ||
+        e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+        (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 16000)) {
+        extern void discord_presence_note_input(void);
+        discord_presence_note_input();
+    }
+
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {
         scanned = true;
@@ -1274,6 +1283,10 @@ static void fill_state(Cpu *c) {
     int32_t mrx, mry;
     mouse_stick(&mrx, &mry);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx + mrx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry + mry) + script_ry);
+    if (b || abs(lx) > 16000 || abs(ly) > 16000 || abs(rx) > 16000 || abs(ry) > 16000) {
+        extern void discord_presence_note_input(void);
+        discord_presence_note_input();
+    }
     {
         extern uint64_t renderer_present_count(void);
         record_input(renderer_present_count(), b, (int32_t[4]){lx, ly, rx, ry});  // (before mirror mode swaps them)
