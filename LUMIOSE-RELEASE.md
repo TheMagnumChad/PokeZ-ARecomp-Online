@@ -3,7 +3,9 @@
 1. Extract the entire archive into a writable folder.
 2. Open **Lumiose Online.exe**. Keep the preparation window open.
 3. In the launcher, select your own Pokémon Legends: Z-A game files, including
-   the 2.0.2 update and DLC. Follow the setup prompts. The game is not included.
+   the 2.0.2 update and DLC. A 2.0.2 `.nup` works too and needs no keys; add the
+   DLC 2 `.nsp` with your `prod.keys` / `title.keys` if you want the DLC. Follow
+   the setup prompts. The game is not included.
 4. After setup, Lumiose prepares automatically and the launcher reopens. The
    first preparation can take several minutes.
 

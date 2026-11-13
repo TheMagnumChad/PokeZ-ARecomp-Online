@@ -32,8 +32,10 @@ uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; s
 bool maxwell_gmem_lazy;
 bool maxwell_flat_default = true;
 bool maxwell_quad_ops;  // (vk_exec_init: the device has quad subgroup operations in fragment shaders)
+int maxwell_gather_bias_default;  // (vk_exec_init: the sub-texel bits on AMD / Intel Windows; gather_bias)
 bool maxwell_quad_deriv_default;  // (vk_exec_init: AMD; quad_deriv)
 bool maxwell_quad_control_ok, maxwell_quad_control_default;  // (vk_exec_init: the device has quad control; AMD: on)
+bool maxwell_lockstep_default = true;  // (vk_exec_init: helpers guaranteed - NVIDIA, or quad control on; quad_lockstep)
 // (vulkan/device.c: the device has shaderOutputLayer. Without it - Dozen, DirectX 12 underneath - a vertex shader's
 // render target layer is written to a local and dropped: the draw goes to layer 0 instead of its pipeline failing)
 bool maxwell_output_layer = true;
@@ -456,10 +458,22 @@ static bool quad_control_on(void) {
 // Fall-through between cases becomes a jump, so a block only starts at the top of a turn. A finished pixel waits (pc
 // 0xffffff) until the quad is done; KIL kills it after the loop. LARECOMP_SHADER_QUAD_LOCKSTEP=1 on (default), 0 off,
 // 3 test: every fragment shader with branches; 4 test: on, those shaders blue and red where a pixel waited for its
-// quad; 5 test: off, red by the turns each pixel took (the iris: rings of turns, quads split at their edges)
+// quad; 5 test: off, red by the turns each pixel took (the iris: rings of turns, quads split at their edges).
+// The quad's lowest pc counts its helper invocations (the pixels outside the triangle): it needs them to step with the
+// others. AMD without VK_KHR_shader_quad_control (every GCN card - Vega iGPUs, RX 400/500 - and drivers without it)
+// doesn't promise that: there the quad's lowest pc stayed a helper's, no real pixel could step, and the loop ran to its
+// guard - eyes cut short (solid cyan) and 9 fps whenever NPC eyes were on screen (#203, Ryzen 7 5700G's Vega 8; #189;
+// #192 RX 570 slower since v0.1.18). Simulated here with helpers that never step (6 / 7 below): 9 fps, as reported;
+// leaving helpers out of the lowest pc gave back the speed but garbled irises (their values feed the derivatives). So
+// the lockstep only runs where helpers are guaranteed: NVIDIA (seen here) or quad control on; elsewhere off - v0.1.17's eyes
+// (AMD GCN #203; Intel's frozen Ice Lake driver hung the GPU on it, #208).
+// 6 test: helpers never step, and don't count; 7 test: helpers never step and do count (v0.1.18 on GCN: the bug).
 static int quad_lockstep(void) {
     static int m = -1;
-    if (m < 0) { const char *e = getenv("LARECOMP_SHADER_QUAD_LOCKSTEP"); m = e ? atoi(e) : 1; }
+    if (m < 0) {
+        const char *e = getenv("LARECOMP_SHADER_QUAD_LOCKSTEP");
+        m = e ? atoi(e) : maxwell_lockstep_default;  // (vk_exec_init: NVIDIA, or quad control on)
+    }
     return m;
 }
 
@@ -1005,12 +1019,29 @@ static void emit_atom(Ctx *c, uint64_t w, bool red) {
 // over the whole image with FSR's 67% render resolution (and Dynamic resolution): the whole picture's shadows squeezed
 // into a 67% rectangle, older frames' shadows outside it (other lighting in the rectangle, a ghost of the player's
 // shadow beside it)
+//
+// Then a bias of a fraction of a texel (Ryujinx's TexturePass gather bias, the same rule): a gather whose coordinate
+// sits exactly between two texels may take either 2x2 group by the spec, and AMD's and Intel's Windows drivers take the
+// other one than the Switch (and NVIDIA): shadow edges and gathered depth then step by a texel as the camera moves.
+// The bias is 1 / (size * 2^(subTexelPrecisionBits + 1)), the least that moves a midpoint to the Switch's side.
+// LARECOMP_GATHER_BIAS=0 off, =<bits> that precision; default the device's bits on AMD / Intel Windows, else off.
+static int gather_bias(void) {
+    static int b = -1;
+    if (b < 0) { const char *e = getenv("LARECOMP_GATHER_BIAS"); b = e ? atoi(e) : maxwell_gather_bias_default; }
+    return b > 0 && b < 24 ? b : 0;
+}
+
 static void gather_uv(Ctx *c, int slot, char *xy, size_t n) {
-    if (c->stage == STAGE_VERTEX) return;
     char w[700];
-    snprintf(w, sizeof w, "uvs(%s, rscale[%d])", xy, slot + 1);
-    snprintf(xy, n, "%s", w);
-    c->uses_rscale = true;
+    if (c->stage != STAGE_VERTEX) {
+        snprintf(w, sizeof w, "uvs(%s, rscale[%d])", xy, slot + 1);
+        snprintf(xy, n, "%s", w);
+        c->uses_rscale = true;
+    }
+    if (gather_bias()) {
+        snprintf(w, sizeof w, "(%s + 1.0 / (vec2(tsize%d(0).xy) * %.1f))", xy, slot, (double)(1u << (gather_bias() + 1)));
+        snprintf(xy, n, "%s", w);
+    }
 }
 
 // TLD4S (2D gather, one component or a depth compare; per Ryujinx's EmitTexs Tld4s): x in Ra, y in Rb - or y in Ra+1
@@ -2897,11 +2928,15 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         bool report = maxwell_guard_word && c->stage == STAGE_COMPUTE && c->info->uses_gmem;
         sp(&s, "  uint guard = 0u;\n  for (; guard < %uu; guard++) {\n", loop_guard());
         if (c->quad_lockstep && quad_lockstep() != 5) {  // (the quad's lowest pc runs, the others wait: quad_lockstep)
-            sp(&s, "  { float pf_ = float(min(pc, 16777215u));\n"
+            sp(&s, quad_lockstep() != 6 ? "  { float pf_ = float(min(pc, 16777215u));\n"
+                                        : "  { float pf_ = gl_HelperInvocation ? 16777215.0f : float(min(pc, 16777215u));\n");
+            sp(&s, "%s"
                    "    float m_ = min(pf_, pf_ + dFdxFine(pf_) * ((uint(gl_FragCoord.x) & 1u) == 0u ? 1.0f : -1.0f));\n"
                    "    m_ = min(m_, m_ + dFdyFine(m_) * ((uint(gl_FragCoord.y) & 1u) == 0u ? 1.0f : -1.0f));\n"
                    "    if (m_ >= 16777215.0f) break;\n    if (float(min(pc, 16777215u)) != m_) { %scontinue; } }\n",
-               quad_lockstep() == 4 ? "waited_ = true; " : "");
+               "", quad_lockstep() == 4 ? "waited_ = true; " : "");
+            if (quad_lockstep() == 6 || quad_lockstep() == 7)  // (test: helpers never step, as on AMD without quad control)
+                sp(&s, "  if (gl_HelperInvocation) continue;\n");
             // a case's fall-through into the next one: a jump, so the next block starts at the top of a turn
             const char *b = body.buf ? body.buf : "";
             bool first = true;

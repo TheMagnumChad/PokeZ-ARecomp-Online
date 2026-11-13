@@ -20,6 +20,7 @@ typedef struct {
     uint32_t w, h, ow, oh;
     float jx, jy, dt_ms, near_z, fov_y, sharpness;
     bool reset;
+    int slot;  // (DLAA) which DLSS feature - history: 0 the scene's, 1 / 2 the clothing screen's character (exec.c pv_resolve)
 } VkFsr2Frame;
 
 // Records FSR 2 into cmd (a command buffer the caller records itself, not the recorder's); false: not done (logged)
@@ -31,6 +32,11 @@ void vk_fsr2_destroy(VkDevice dev);
 // failed (logged; FSR 2 from then on)
 bool vk_fsr3_available(void);
 bool vk_fsr3_record(VkPhysicalDevice phys, VkDevice dev, VkCommandBuffer cmd, const VkFsr2Frame *f);
+// AMD FSR 4.1.2 on Linux, through a user-supplied libamd_fidelityfx_upscaler_vk.so (fsr4.cpp, FidelityFX SDK 2.4 ABI);
+// the device must expose cooperative matrix and shader float8 (device.c g_vk.fsr4). False: FSR 2/3 stays.
+bool vk_fsr4_wanted(void);
+bool vk_fsr4_available(void);
+bool vk_fsr4_record(VkPhysicalDevice phys, VkDevice dev, VkCommandBuffer cmd, const VkFsr2Frame *f);
 // (fsr2.cpp, for both) a log line as runtime/rt.h rt_log; an SDK's message as "[tag] error / warning: ..." (the first 50)
 void vk_fsr_log(const char *fmt, ...);
 void vk_fsr_message(const char *tag, bool error, const wchar_t *m);

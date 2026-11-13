@@ -931,6 +931,15 @@ static void ring_unpin(void) {
     for (int i = 0; i < nchunks; i++) if (chunks[i].seq >= ring_pin) chunks[i].seq = vk_pending_seq();
     ring_pin = 0;
 }
+// (per-object motion vectors, objmv_capture / objmv_replay) the same, a pin of their own: their draws are drawn again
+// later than the planar reflections' (at the temporal anti-aliasing's motion pass)
+static uint64_t mv_pin;
+static bool mv_lost;
+static void mv_unpin(void) {
+    if (!mv_pin) return;
+    for (int i = 0; i < nchunks; i++) if (chunks[i].seq >= mv_pin) chunks[i].seq = vk_pending_seq();
+    mv_pin = 0;
+}
 
 VkSpan vk_transient(uint64_t size, uint64_t align) {
     if (align < 16) align = 16;
@@ -948,11 +957,12 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     uint64_t done = vk_completed_seq();
     int pick = -1;
     for (int i = 0; i < nchunks; i++)
-        if (i != active && chunks[i].seq <= done && !(ring_pin && chunks[i].seq >= ring_pin) && chunks[i].size >= size) { pick = i; break; }
+        if (i != active && chunks[i].seq <= done && !(ring_pin && chunks[i].seq >= ring_pin) && !(mv_pin && chunks[i].seq >= mv_pin) && chunks[i].size >= size) { pick = i; break; }
     if (pick < 0) pick = new_chunk(size > CHUNK_SIZE ? size : CHUNK_SIZE);
     if (pick < 0) {  // no memory for another chunk (a GTX 1060 with 6 GB: issue #45): wait for the work already submitted,
         // which frees the chunks only it used, and take one of those (the recording in progress keeps its own)
         if (ring_pin) ring_pin = 0, ring_lost = true;
+        if (mv_pin) mv_pin = 0, mv_lost = true;
         vk_wait_seq(submit_seq);
         done = vk_completed_seq();
         for (int i = 0; i < nchunks; i++)
@@ -1289,6 +1299,16 @@ static void skip_note(int why, bool compute) {
 #define SKIP(why) do { stat_skipped++; if (log_skips) skip_note(why, false); } while (0)
 #define SKIP_CS(why) do { stat_skipped++; if (log_skips) skip_note(why, true); } while (0)
 static void skip_log(void) {
+    // An interval with nothing drawn and draws skipped (#185: an RX 550 on a 2022 driver, "0 draws, 3133 skipped" from the
+    // first frames on - a black screen with sound and menus working - and nothing in the log to say why): the reasons
+    // are logged by themselves for the next 3 intervals, up to 3 times a session
+    static int auto_left, auto_times;
+    if (log_skips <= 0 && !auto_left && auto_times < 3 && stat_draws == 0 && stat_skipped >= 100) {
+        auto_times++, auto_left = 3, log_skips = 1;
+        LOG("[skips] nothing drawn in the last interval, %llu draws skipped: the reasons follow for 3 intervals\n",
+            (unsigned long long)stat_skipped);
+        return;
+    }
     if (log_skips <= 0) return;
     uint64_t total = 0;
     for (int i = 0; i < SK_N; i++) total += skip_n[i];
@@ -1313,6 +1333,7 @@ static void skip_log(void) {
         LOG("\n");
     }
     memset(skip_n, 0, sizeof skip_n);
+    if (auto_left && !--auto_left) log_skips = 0;
     int k = 0;  // (an offender not skipped this interval is dropped: its "for N s" starts again if it comes back)
     for (int i = 0; i < skip_ntop; i++)
         if (skip_top[i].n) { skip_top[k] = skip_top[i]; skip_top[k++].n = 0; }
@@ -1530,11 +1551,16 @@ void vk_exec_init(void) {
     // wrong without it: a dotted pattern over clothes and hair, turned off by this switch alone (5600G, #74).
     // LARECOMP_SHADER_FLAT=1: on, =0: off everywhere
     // (F1 > Compatibility: On / Off over the per-GPU default)
+    // On Linux AMD (RADV) it is on again where the guest memory goes in through the 256 MB import window - the default
+    // there since #195 (gmem_window_init) - and #51's crash came with the whole-window import only: without this form
+    // RADV drew clothes and hair dotted as AMD's Windows driver did (#204, after v0.1.19 made discrete AMD on RADV draw
+    // at all). LARECOMP_VK_GMEM_WINDOW=0 (the whole import) keeps it off there.
     int fcs = g_settings.gpu_compat[GPU_STRAIGHT];
 #ifdef _WIN32
     bool flat_auto = true;
 #else
-    bool flat_auto = g_vk.props.vendorID != 0x1002;
+    const char *gw = getenv("LARECOMP_VK_GMEM_WINDOW");
+    bool flat_auto = g_vk.props.vendorID != 0x1002 || !(gw && strtoull(gw, NULL, 10) == 0);
 #endif
     maxwell_flat_default = fcs != GPU_AUTO ? fcs == GPU_ON : flat_auto;
     VkPhysicalDeviceSubgroupProperties sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
@@ -1542,19 +1568,36 @@ void vk_exec_init(void) {
     vkGetPhysicalDeviceProperties2(g_vk.phys, &pr2);
     maxwell_quad_ops = (sg.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) && (sg.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT);
     maxwell_quad_deriv_default = g_vk.props.vendorID == 0x1002;  // (translate.c quad_deriv: helpers in quad swaps)
+    {  // (translate.c gather_bias: AMD's and Intel's Windows drivers gather a midpoint coordinate from the other 2x2)
+        extern int maxwell_gather_bias_default;
+#ifdef _WIN32
+        if (g_vk.props.vendorID == 0x1002 || g_vk.props.vendorID == 0x8086)
+            maxwell_gather_bias_default = (int)g_vk.props.limits.subTexelPrecisionBits;
+#endif
+        const char *gb = getenv("LARECOMP_GATHER_BIAS");
+        int bits = gb ? atoi(gb) : maxwell_gather_bias_default;
+        LOG("[vk] gather bias: %s (%d sub-texel bits; LARECOMP_GATHER_BIAS)\n", bits > 0 ? "on" : "off", bits > 0 ? bits : (int)g_vk.props.limits.subTexelPrecisionBits);
+    }
     extern bool maxwell_quad_control_ok, maxwell_quad_control_default;
     maxwell_quad_control_ok = g_vk.quad_control;  // (translate.c quad_control_on: full quads where the game derives itself)
     maxwell_quad_control_default = g_vk.quad_control && g_vk.props.vendorID == 0x1002;
     {
         const char *qc = getenv("LARECOMP_SHADER_QUAD_CONTROL");
         bool qc_on = g_vk.quad_control && (qc ? atoi(qc) != 0 : maxwell_quad_control_default);  // (as translate.c decides)
+        // The iris lockstep (translate.c quad_lockstep) needs helper invocations that step with the quad: NVIDIA's do (seen
+        // here), and quad control's full quads promise it. Elsewhere it ran to its loop guard on every eye: 9 fps on AMD
+        // GCN (#203), and on Intel's frozen Ice Lake driver (Vulkan 1.3.215, no quad control) the slow iGPU took long
+        // enough to hang the GPU - device lost after 25 s to 4 min, at any resolution (#208)
+        extern bool maxwell_lockstep_default;
+        maxwell_lockstep_default = g_vk.props.vendorID == 0x10de || qc_on;
         LOG("[vk] fragment shaders' own derivatives: %s (LARECOMP_SHADER_QUAD_CONTROL, LARECOMP_SHADER_QUAD_DERIV); the driver's "
             "quad control and maximal reconvergence: %s; quads in step through the iris loop: %s (LARECOMP_SHADER_QUAD_LOCKSTEP)\n",
             qc_on ? "quad swaps in full quads, quads kept together (quad control)"
             : getenv("LARECOMP_SHADER_QUAD_DERIV") ? getenv("LARECOMP_SHADER_QUAD_DERIV")
             : maxwell_quad_deriv_default ? "the hardware's (AMD: helpers in quad swaps)" : "quad swaps",
             g_vk.quad_control ? "yes" : "no",
-            getenv("LARECOMP_SHADER_QUAD_LOCKSTEP") ? getenv("LARECOMP_SHADER_QUAD_LOCKSTEP") : "yes");
+            getenv("LARECOMP_SHADER_QUAD_LOCKSTEP") ? getenv("LARECOMP_SHADER_QUAD_LOCKSTEP")
+            : !maxwell_lockstep_default ? "no (no quad control: helpers can't be relied on, #203 #208)" : "yes");
     }
     LOG("[vk] subgroups: %u lanes, quad operations in fragment shaders: %s\n", sg.subgroupSize, maxwell_quad_ops ? "yes" : "no");
     if (!getenv("LARECOMP_SHADER_FLAT") && !maxwell_flat_default)
@@ -3087,6 +3130,10 @@ typedef struct { int kind; bool indexed; VkBuffer buf; VkDeviceSize off; uint32_
 static bool planar_on(void);
 static void planar_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescriptorSet sets[2], uint32_t ndyn, const uint32_t *dyn,
                            uint32_t nv_dyn, bool gmem, const PlDrawCall *dc);
+static void objmv_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescriptorSet sets[2], uint32_t ndyn, const uint32_t *dyn,
+                           uint32_t nv_dyn, bool gmem, const PlDrawCall *dc);
+static void objmv_replay(TexBackend *mvb, VkImageView zv, uint32_t w, uint32_t h);
+static void objmv_check(TexBackend *sb, TexBackend *mvb, uint32_t w, uint32_t h, bool cam);
 static void planar_light(Prog *pr, Pipe *pp, const VkDescriptorImageInfo *fii, VkDescriptorSet vset, const uint32_t *dyn,
                          uint32_t nv_dyn, const float rs0[4], const float *tint, uint32_t streams, const PlDrawCall *dc);
 // (record.c, at the bind) the pipeline of a Pipe: NULL while it builds (wait: sleeps until it is done) or failed
@@ -3696,6 +3743,7 @@ static int taa_kind(void) {
     switch (g_settings.taa) {
     case TAA_FSR2: return TAA_FSR2;
     case TAA_FSR3: return vk_fsr3_available() ? TAA_FSR3 : TAA_FSR2;
+    case TAA_FSR4: return vk_fsr4_available() ? TAA_FSR4 : vk_fsr3_available() ? TAA_FSR3 : TAA_FSR2;
     case TAA_DLAA: return vk_dlaa_available() ? TAA_DLAA : TAA_GAME;
     default: return TAA_GAME;
     }
@@ -3714,6 +3762,11 @@ float vk_taa_render_share(void) {
     int pct = env > 0 ? env : g_settings.taa_render;
     pct = pct < 50 ? 50 : pct > 100 ? 100 : pct;
     int kind = taa_kind();
+    static bool logged;
+    if (!logged) {  // (one line: which of the temporal paths the setting chose)
+        logged = true;
+        LOG("[taa] setting %d, running %d, render %d%%\n", g_settings.taa, kind, pct);
+    }
     if (pct == 100 || kind == TAA_GAME || kind == TAA_DLAA || fsr2_up_broken ||  // (DLAA: anti-aliasing only)
         g_settings.res_mode == RES_DYNAMIC || fsr2_ok_frame == ~0ull || fsr2_ok_frame + 30 < vk_frame_counter())
         return 1;
@@ -3748,7 +3801,83 @@ static bool fsr2_scene_pass(void) {
     NvnTexture *d = st.rt.depth;
     TexBackend *b = d ? d->backend : NULL;
     if (!b || !b->scalable || d->width == d->height) return false;
+    // A colour target not drawn at the scene's scale isn't the scene's: the clothing screen draws its character into
+    // an image of its own (1600x1080) with the scene's depth, and the menu draws that image after the scene was resolved
+    // - jittered, its edges shook. It takes the jitter only when DLAA resolves it too (pv_*, below).
+    for (int i = 0; i < 8; i++) {
+        TexBackend *cb = st.rt.color[i] ? st.rt.color[i]->backend : NULL;
+        if (cb && !cb->scalable) return false;
+    }
     return !(st.rt.has_dview && (st.rt.dview.setmask & 1) && st.rt.dview.base_level);
+}
+
+// ---- DLAA for the clothing screen's character (pv_*: the outfit screen, the clothing shop, the hair salon). The menu
+// draws the character into an RGBA8 image of its own (1600x1080: alpha 255 on it, 0 and black around) with the
+// scene's depth, then blends it over the blurred background (SRC_ALPHA, ONE_MINUS_SRC_ALPHA) after the scene was
+// resolved. With DLAA, that image is drawn jittered too and
+// resolved by DLSS features of its own as soon as the menu leaves it (pv_resolve, from the next render target
+// change): one for its colour, one for its alpha (a grey picture), so that its edges are smoothed against whatever
+// is behind. Its motion: the camera stays while the right stick turns the model, so the motion vectors come from
+// the camera x the character's model matrix (vertex constant buffers 5 and 10), the scene's depth where it was drawn.
+// Only at the scene's own scale (1x: the depth's pixels are the image's), else that image takes no jitter at all.
+// LARECOMP_DLAA_PREVIEW=0: off (no jitter, no resolve).
+static struct {
+    NvnTexture *tex, *depth;
+    uint64_t frame;
+    float vp[16];       // (this frame's camera x model matrix, from its first draw)
+    bool mixed, done;   // (draws with other model matrices; resolved)
+} pv_cur;
+static float pv_last_vp[16];
+static uint64_t pv_last_frame = ~0ull, pv_ok_frame = ~0ull;
+static int pv_on(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_DLAA_PREVIEW") || atoi(ENV("LARECOMP_DLAA_PREVIEW")) != 0;
+    return on;
+}
+// this draw goes into such an image, and DLAA can resolve it
+static bool pv_pass(void) {
+    if (!pv_on() || taa_kind() != TAA_DLAA) return false;
+    int nc = 0;
+    for (int i = 0; i < 8; i++) nc += st.rt.color[i] != NULL;
+    NvnTexture *c = st.rt.color[0], *d = st.rt.depth;
+    if (nc != 1) return false;
+    TexBackend *cb = c ? c->backend : NULL, *db = d ? d->backend : NULL;
+    if (!cb || !db || cb->scalable || !db->scalable || d->width == d->height) return false;
+    if (cb->format != VK_FORMAT_R8G8B8A8_SRGB && cb->format != VK_FORMAT_R8G8B8A8_UNORM) return false;
+    if (db->sx != 1 || db->sy != 1 || vp_sx != 1 || vp_sy != 1 || vp_ox != 0 || vp_oy != 0) return false;  // (1x only)
+    if (cb->width > db->width || cb->height > db->height) return false;
+    // (the character's image is 1600x1080 at any output size; smaller ones drawn the same way - a 274x262 one while the
+    // game loads after Continue - only lose the jitter, as fsr2_scene_pass says: no DLSS features of their own)
+    if (cb->width < 1280 || cb->height < 720) {
+        static int nl;
+        if (nl++ < 3) LOG("[dlaa] %ux%u image drawn with the scene's depth: no jitter, not resolved (not the clothing screen's)\n", cb->width, cb->height);
+        return false;
+    }
+    return !(st.rt.has_dview && (st.rt.dview.setmask & 1) && st.rt.dview.base_level);
+}
+// notes the draw's transform; true: it takes the jitter (DLSS resolved the image last frame)
+static bool pv_note(void) {
+    extern uint64_t vk_frame_counter(void);
+    uint64_t f = vk_frame_counter();
+    bool jit = pv_ok_frame + 1 == f;
+    if (pv_cur.frame != f || pv_cur.tex != st.rt.color[0]) {
+        pv_cur.frame = f, pv_cur.tex = st.rt.color[0], pv_cur.depth = st.rt.depth;
+        memset(pv_cur.vp, 0, sizeof pv_cur.vp);
+        pv_cur.mixed = pv_cur.done = false;
+    }
+    if (!st.ubuf[0][2].addr || st.ubuf[0][2].size < 64 || !st.ubuf[0][7].addr || st.ubuf[0][7].size < 64) return jit;
+    const float *P = (const float *)(uintptr_t)st.ubuf[0][2].addr, *M = (const float *)(uintptr_t)st.ubuf[0][7].addr;
+    // clip = cb5 x cb10's first 4x4 (the model: columns, as the camera's; its inverse follows it) x the vertex. (Checked
+    // by warping one frame's picture with the motion vectors onto the next, the model turning: error 3.5, against 11.6
+    // with no motion and 18.7 with the model's rotation the other way.)
+    float C[16];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            C[i + 4 * j] = P[i] * M[4 * j] + P[i + 4] * M[4 * j + 1] + P[i + 8] * M[4 * j + 2] + P[i + 12] * M[4 * j + 3];
+    for (int i = 0; i < 16; i++) if (!isfinite(C[i])) return jit;
+    if (pv_cur.vp[15] == 0 && pv_cur.vp[11] == 0 && pv_cur.vp[3] == 0) memcpy(pv_cur.vp, C, sizeof C);  // (the first)
+    else if (memcmp(C, pv_cur.vp, sizeof C)) pv_cur.mixed = true;
+    return jit;
 }
 uint32_t nvn_window_origin(void);
 
@@ -4049,8 +4178,28 @@ static bool snap_on(void) {
     return snap_state;
 }
 static uint64_t snap_ring_end(void) { return snap_on() ? snap_base + SNAP_RING : 0; }  // (heap offset; 0: no ring)
+// The ring for the copies of a compute dispatch's uniform buffers outside the window (cbuf_info): the snapshots' own
+// when they are on; with them off (no overlap - AMD's default) the same ring after a physical-memory window, which
+// gwin_pick reserved and the import covers. Not over lazy chunks without the snapshots (the ring isn't imported then).
+static int uring_state = -1;  // -1 not decided, 0 none, 1 the ring set up here (snapshots off)
+static bool copy_ring_on(void) {
+    if (snap_on()) return true;
+    if (snap_state < 0 || gc_lazy) return false;  // (not decided yet / lazy chunks)
+    if (uring_state < 0) {
+        uring_state = 0;
+        uint64_t base = (gwin_.ring + 0xFFFF) & ~0xFFFFull;
+        if (gwin()->phys && gwin_.ring && base + SNAP_RING <= gwin_max) {
+            snap_base = base;
+            plat_commit(gwin_base + snap_base, SNAP_RING);
+            uring_state = 1;
+            LOG("[vk] compute uniform buffers outside the guest memory window: copies at %llx\n", (unsigned long long)(gwin_base + snap_base));
+        }
+    }
+    return uring_state == 1;
+}
 static void snap_reset(void) {  // (vk_exec_reset: a reboot - the heap is set up again, its pages replaced)
     snap_state = -1;
+    uring_state = -1;
     snap_base = snap_off = 0;
     snap_half = 0;
     snap_half_seq[0] = snap_half_seq[1] = 0;
@@ -4530,10 +4679,26 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             for (int i = 0; i < 16; i++) key.ub[i][0] = st.ubuf[5][i].addr, key.ub[i][1] = st.ubuf[5][i].size;
             key.g[0] = gx, key.g[1] = gy, key.g[2] = gz;
         }
+        // A compute shader reads its uniform buffers through the table below with global memory loads, which reach
+        // only the guest memory window: one outside it read zero (Pokémon Z-A: the rain's particle update read its
+        // gravity and drag from 0x745... as 0 - every drop stopped after one step). Those get a copy in the ring, made
+        // now (its contents at this dispatch: no table shared with an earlier dispatch then).
+        uint16_t ucopy = 0;
+        if (stage == 5 && si->uses_gmem)
+            for (int i = 0; i < 16; i++) {
+                uint64_t a = st.ubuf[5][i].addr, sz = st.ubuf[5][i].size;
+                if (a && sz && sz <= 0x10000 && (a < gwin_base || a + sz > gwin_base + gwin_max)) ucopy |= 1u << i;
+            }
+        if (ucopy && !copy_ring_on()) {
+            static int nlog;
+            if (nlog++ < 4) LOG("[vk] compute uniform buffers outside the gmem window (mask %#x, program %llx): no ring for copies, read as zero\n",
+                                ucopy, (unsigned long long)st.program->stages[5].code_addr);
+            ucopy = 0;
+        }
         static struct { uint64_t seq; __typeof__(key) key; VkSpan span; } last[3];
         int slot = stage == 5 ? 2 : stage == 1 ? 1 : 0;
         uint64_t seq = vk_pending_seq();
-        if (last[slot].seq == seq && !memcmp(&last[slot].key, &key, sizeof key)) return ubo_span(last[slot].span, size);
+        if (!ucopy && last[slot].seq == seq && !memcmp(&last[slot].key, &key, sizeof key)) return ubo_span(last[slot].span, size);
         uint32_t drv[0x800 / 4] = {0};
         if (si->uses_gmem) {  // storage buffers outside the guest memory window: their shader accesses read zero
             static int nlog;
@@ -4550,7 +4715,12 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
             for (int i = 0; i < 16; i++) {
                 uint32_t *u = &drv[(0x210 + 16 * i) / 4];
-                u[0] = (uint32_t)st.ubuf[5][i].addr; u[1] = (uint32_t)(st.ubuf[5][i].addr >> 32); u[2] = (uint32_t)st.ubuf[5][i].size;
+                uint64_t ua = st.ubuf[5][i].addr, us = st.ubuf[5][i].size;
+                if ((ucopy >> i) & 1) {
+                    uint64_t c = ring_take((us + 255) & ~255ull);
+                    if (c) { memcpy((void *)(uintptr_t)c, (const void *)(uintptr_t)ua, us); ua = c; stat_snap_bytes += us; }
+                }
+                u[0] = (uint32_t)ua; u[1] = (uint32_t)(ua >> 32); u[2] = (uint32_t)us;
                 uint32_t *e = &drv[(0x310 + 16 * i) / 4];
                 e[0] = (uint32_t)sb[i].addr; e[1] = (uint32_t)(sb[i].addr >> 32); e[2] = (uint32_t)sb[i].size;
             }
@@ -4608,10 +4778,28 @@ static uint64_t gmem_lo, gmem_window;
 // The window is anchored at the end of the physical region (gwin_max: constant for the session, so shaders may bake it): [lo, gwin_max).
 // Only with a physical-memory window (no heap), else the whole heap as before. The generated shader code computes ga = addr - base, ok = ga < size,
 // so translate_program / build_compute set base and size to the window too (the window changed them by lo: text and buildings read the wrong place).
-// default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB; LARECOMP_VK_GMEM_WINDOW=0 imports it all
+// default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB, and on any AMD GPU
+// on Linux (amdgpu revalidates a userptr import at every submit there too: an RX 7800 XT at ~7 fps with all of it);
+// LARECOMP_VK_GMEM_WINDOW=0 imports it all
+static bool gmem_switch2_edition(void) {
+    // A .nup's Switch 2 Edition upgrade add-on: the importer writes its RomFS image as aoc/0100f43008c45001.bin.
+    // The larger edition's assets reach below the top 256 MB of the physical window, which leaves those textures
+    // reading as zero (the world and all of its text black, the HUD art fine): import the whole window instead.
+    FILE *f = fopen("extracted/aoc/0100f43008c45001.bin", "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
 static void gmem_window_init(void) {
     const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
-    gmem_window = w ? strtoull(w, NULL, 10) << 20 : g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 256ull << 20 : 0;
+    bool small = g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, s2 = false;
+#ifdef __linux__
+    small = small || g_vk.props.vendorID == 0x1002;
+    // A discrete AMD GPU: the Switch 2 Edition's assets reach below the top 256 MB, so import 1 GB (the whole 3.2 GB
+    // window costs too much on amdgpu: ~11 fps against 30 at 1 GB on the RX 9070 XT). An APU keeps 256 MB.
+    if (small && g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && gmem_switch2_edition())
+        small = false, s2 = true;
+#endif
+    gmem_window = w ? strtoull(w, NULL, 10) << 20 : s2 ? 1024ull << 20 : small ? 256ull << 20 : 0;
 }
 static void gmem_window_get(uint64_t *lo, uint64_t *len) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;  // (the translator and the render thread - run_queued_now - both ask)
@@ -5069,6 +5257,13 @@ static bool guest_heap_dmabuf(void) {
     if (gmem_buf || !g_vk.dev || !(g_vk.dmabuf || g_vk.map_placed) || getenv("LARECOMP_VK_NO_GMEM")) return false;
     const char *e = getenv("LARECOMP_VK_HEAP_DMABUF");
     if (e ? !atoi(e) : !strstr(g_vk.props.deviceName, "RADV")) return false;
+    // Pokémon Z-A has no heap: its memory is the window (gwin: physical memory, 7676b00000 on 2.0.2), past the end of this
+    // mapping. gmem_buf set here kept gmem_info from importing that window, so shaders read this empty buffer: the world
+    // and all text black, the HUD art and 60 fps intact, no error (RX 7800 XT, RADV; an APU's system heap is too small to
+    // get here, which is why the Steam Deck never showed it). Asked of the files as gmem_chunk_shift does: this runs
+    // before the boot sets g_game_is_la. LARECOMP_VK_HEAP_DMABUF=1 still forces it.
+    extern bool game_files_are_la(const char *game_dir);
+    if (!e && (!g_game_is_la || !game_files_are_la("extracted"))) return false;
     const uint64_t size = HEAP_MAX;
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
@@ -5856,15 +6051,19 @@ static VkDescriptorBufferInfo gfast_info(void) {
 // heap's import (host memory), every vertex was a scattered write across PCIe: 3 ms of GPU time a frame (7 with
 // mods/MaxLOD). Instead the sessions write a device-local mirror of the arena (XFB_BUFFER_INDEX), the vertex streams
 // inside parts written that way read it (guest_direct), and at each session's end the parts written are copied back
-// to the heap (one small DMA transfer), for anything else that reads them there. Ranges outside the mirror's 64 MB
-// window go to the heap as before. LARECOMP_VK_XFB_MIRROR=0: off, =1: on. Off by default on AMD GPUs (#22: an RX 9070 XT
-// lost the device on an invalid GPU read in exactly these skinning draws, with robust access on and submissions made
-// one at a time) - their transform feedback goes to the heap's import as before the mirror.
-#define XM_SIZE (64ull << 20)
+// to the heap (one small DMA transfer), for anything else that reads them there. Ranges outside the mirror's 128 MB
+// window go to the heap as before; the window follows the sessions when they move (xm_prepare). LARECOMP_VK_XFB_MIRROR=0:
+// off, =1: on. Off by default on AMD GPUs (#22: an RX 9070 XT lost the device on an invalid GPU read in exactly these
+// skinning draws, with robust access on and submissions made one at a time) - their transform feedback goes to the
+// heap's import as before the mirror.
+#define XM_SIZE (128ull << 20)  // (64 MB: after going to another area, the sessions spanned 77 MB)
 #define XM_CHUNK 256ull
 static VkBuffer xm_buf;
 static VmaAllocation xm_mem;
 static uint64_t xm_lo;  // guest address of the mirror's first byte (0: not placed yet)
+// how many times the window moved (xm_prepare): offsets into the mirror from before a move name other memory - the
+// per-object motion vectors' copy of last frame's arena (objmv_*) is only used when no move came after it
+static uint32_t xm_moves;
 // the frame each chunk was last written by transform feedback (+1; 0: never): only this frame's are read from the
 // mirror - the game reuses the arena's memory (other data written by the CPU when areas / outfits change: read from
 // the mirror, a stale skinning drew the player black)
@@ -5906,6 +6105,60 @@ static bool xm_prepare(void) {
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &xm_buf, &xm_mem, NULL) != VK_SUCCESS) { xm_buf = VK_NULL_HANDLE; return false; }
     }
+    // The sessions don't stay where the window was placed: in some runs a few were below it from the first scene on (4-11
+    // of ~110 a frame), and after going to another area they spanned 76-77 MB, ~40 a frame outside 64 MB from then on,
+    // also back in the first scene (where the GPU went from 7.2 to 10.5-10.9 ms a frame: the mirror's gain lost). Each frame's sessions' span is kept; when some fell outside
+    // last frame and the span fits, the window is placed around it again, at the next frame's first session (nothing
+    // is read from the mirror then: only this frame's chunks are, and they're cleared). Not while copies back to the heap
+    // are queued: their offsets are the old window's. LARECOMP_XM_FOLLOW=0: the window stays where it was first placed.
+    static int follow = -1;
+    if (follow < 0) follow = ENV("LARECOMP_XM_FOLLOW") ? atoi(ENV("LARECOMP_XM_FOLLOW")) != 0 : 1;
+    static uint64_t sp_f = ~0ull, sp_lo, sp_hi;
+    static uint32_t sp_out, sp_n;
+    uint64_t fc = vk_frame_counter();
+    if (fc != sp_f) {
+        // (log: the first 3 frames with sessions outside, each move, and every 10 s how many frames had some)
+        static uint32_t out_frames, out_sessions, nlog;
+        static uint64_t last_sum;
+        uint64_t now = SDL_GetTicksNS();
+        if (out_frames && now - last_sum > 10000000000ull) {
+            LOG("[vk] transform feedback mirror: %u frames in the last %.0f s with sessions outside it (%u sessions)\n", out_frames,
+                (now - last_sum) / 1e9, out_sessions);
+            out_frames = out_sessions = 0, last_sum = now;
+        } else if (!out_frames) last_sum = now;
+        if (sp_f != ~0ull && sp_out && xm_lo) {
+            bool fits = sp_hi > sp_lo && sp_hi - sp_lo <= XM_SIZE - (4ull << 20);
+            bool move = follow && fits && !xm_back_n;
+            out_frames++, out_sessions += sp_out;
+            if (nlog < 3 || move) {
+                nlog++;
+                LOG("[vk] frame %llu: %u of %u transform feedback sessions outside the mirror (%llx-%llx; sessions at %llx-%llx)%s\n",
+                    (unsigned long long)sp_f, sp_out, sp_n, (unsigned long long)xm_lo, (unsigned long long)(xm_lo + XM_SIZE),
+                    (unsigned long long)sp_lo, (unsigned long long)sp_hi,
+                    move ? ": moved" : !follow ? "" : !fits ? ": too far apart to move" : ": copies queued, next frame");
+            }
+            if (move) {  // centred on the span, on a 1 MB boundary
+                uint64_t lo = ((sp_lo + sp_hi) / 2 - XM_SIZE / 2) & ~0xFFFFFull;
+                if (lo > sp_lo) lo = sp_lo & ~0xFFFFFull;
+                if (lo < gwin_base) lo = gwin_base;
+                if (sp_hi <= lo + XM_SIZE) {
+                    xm_lo = lo;
+                    memset(xm_written, 0, sizeof xm_written);
+                    xm_moves++;
+                    LOG("[vk] transform feedback mirror moved to %llx (+%llu MB)\n", (unsigned long long)xm_lo, (unsigned long long)(XM_SIZE >> 20));
+                }
+            }
+        }
+        sp_f = fc, sp_lo = ~0ull, sp_hi = 0, sp_out = sp_n = 0;
+    }
+    sp_n++;
+    for (int b = 0; b < 4; b++) {
+        if (!xfb_addr[b] || !xfb_size[b]) continue;
+        if (xfb_addr[b] < sp_lo) sp_lo = xfb_addr[b];
+        if (xfb_addr[b] + xfb_size[b] > sp_hi) sp_hi = xfb_addr[b] + xfb_size[b];
+    }
+    for (int b = 0; b < 4; b++)
+        if (xfb_addr[b] && xfb_size[b] && xm_lo && !xm_inside(xfb_addr[b], xfb_size[b])) { sp_out++; break; }
     for (int b = 0; b < 4; b++) {
         if (!xfb_addr[b] || !xfb_size[b]) continue;
         if (!xm_lo) {  // placed around the first session's buffers (the arena is a few MB)
@@ -6440,7 +6693,7 @@ void vk_exec_reset(void) {
     }
     gmem_size = gmem_tried = 0;
     gmem_lo = 0;
-    xm_lo = 0, xm_back_n = 0;  // (the transform feedback mirror: placed again, nothing written yet)
+    xm_lo = 0, xm_back_n = 0, xm_moves++;  // (the transform feedback mirror: placed again, nothing written yet)
     memset(xm_written, 0, sizeof xm_written);
     for (int k = 0; k < gc_n; k++) {  // (lazy chunks: their pages are replaced too)
         if (gc[k].buf) { vkDestroyBuffer(g_vk.dev, gc[k].buf, NULL); vkFreeMemory(g_vk.dev, gc[k].mem, NULL); }
@@ -7204,6 +7457,69 @@ static void args_trace(const char *what, uint64_t code) {
     }
 }
 
+// After a storing dispatch: its writes into storage snapshots, back to the originals. A range the CPU keeps rewriting
+// is bound to compute as a copy (snap_storage), and the GPU's writes stayed in the copy - but draws read vertex streams
+// from the original, in place (Pokémon Z-A's rain: the particle update moves each drop in buffers the CPU also writes
+// new drops into, and the drops were drawn where they were spawned, a sheet hanging ~10 m up). snap_merge.comp writes
+// back the words the dispatch changed (copy vs pristine image) where the CPU hasn't rewritten the original since, the
+// rule rs_copy_make's remake follows. The original's pages are then the GPU's (vc_mark_gpu: draws read them in place).
+// LARECOMP_VK_SNAP_MERGE=0: off (the writes stay in the copy, as before).
+static VkPipeline smerge_pipe;
+static VkPipelineLayout smerge_layout;
+static VkDescriptorSetLayout smerge_set_layout;
+static bool smerge_init(void) {
+    static int on = -1;
+    if (on < 0) on = !ENV("LARECOMP_VK_SNAP_MERGE") || atoi(ENV("LARECOMP_VK_SNAP_MERGE")) != 0;
+    if (!on || smerge_pipe) return on && smerge_pipe;
+    VkDescriptorSetLayoutBinding b = {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+                                      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
+    VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &smerge_set_layout));
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+                                     .pSetLayouts = &smerge_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &pi, NULL, &smerge_layout));
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = smerge_layout,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                .module = vk_builtin_shader("snap_merge.comp"), .pName = "main"}};
+    VK_CHECK(vkCreateComputePipelines(g_vk.dev, VK_NULL_HANDLE, 1, &ci, NULL, &smerge_pipe));
+    return true;
+}
+static void snap_merge_back(VkCommandBuffer cb) {
+    if (!sb_eff_on || gc_lazy || gmem_lo || !gmem_buf) return;  // (the import's offsets must be the window's)
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    for (int i = 0; i < 16; i++) {
+        const Range *o = &st.sbuf[5][i];
+        uint64_t c = sb_eff[5][i].addr;
+        if (!o->addr || !o->size || c == o->addr) continue;
+        const RangeState *e = NULL;
+        for (int k = 0; k < nrs && !e; k++) if (rs_tab[k].addr == o->addr && rs_tab[k].size == o->size) e = &rs_tab[k];
+        if (!e || e->copy != c || !e->pristine) continue;  // (a copy without an image: not a compute slot's)
+        uint64_t lo = o->addr - gwin_base;
+        if ((o->addr | c | e->pristine | o->size) & 3 || o->addr < gwin_base || lo + o->size > gmem_size ||
+            c < gwin_base || e->pristine - gwin_base + o->size > gmem_size)
+            continue;
+        if (!set) {
+            if (!smerge_init()) return;
+            vk_full_barrier(cb);
+            set = vk_alloc_set(smerge_set_layout);
+            VkDescriptorBufferInfo bi = gmem_info();
+            VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0,
+                                      .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi};
+            rec_UpdateDescriptorSets(1, &w);
+            rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, smerge_pipe);
+            rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, smerge_layout, 0, 1, &set, 0, NULL);
+        }
+        uint32_t pc[4] = {(uint32_t)((c - gwin_base) / 4), (uint32_t)((e->pristine - gwin_base) / 4), (uint32_t)(lo / 4),
+                          (uint32_t)(o->size / 4)};
+        rec_CmdPushConstants(cb, smerge_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+        rec_CmdDispatch(cb, (pc[3] + 255) / 256, 1, 1);
+        vc_mark_gpu(lo, lo + o->size);
+    }
+    if (set) vk_full_barrier(cb);
+}
+
 static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz);
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     dispatch_compute_(gx, gy, gz);
@@ -7286,7 +7602,7 @@ static void dispatch_compute_(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (gc_shift && cp->si->uses_gmem) gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, GMEM_CHUNK_SET(STAGE_COMPUTE), 1u << STAGE_COMPUTE);
     rec_CmdDispatch(cb, gx, gy, gz);
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) gfast_finish(cb);
-    if (cp->si->uses_gmem_store) vc_mark_sbufs(5);
+    if (cp->si->uses_gmem_store) snap_merge_back(cb), vc_mark_sbufs(5);
     stat_dispatches++;
     subr_now.dispatches++, subr_now.cs = cp->code;
     if (g_debug_frame && g_fullcap) fullcap_dispatch(true, gx, gy, gz);  // (after: gfast's copy back included)
@@ -8216,6 +8532,8 @@ static void draw_(CmdRec *r, bool indexed) {
         fsr2_frame_jitter();
         if ((fsr2_jx != 0 || fsr2_jy != 0) && fsr2_scene_pass())  // (FSR 2: the frame's sub-pixel offset)
             vx += fsr2_jx * vw / (float)fsr2_scene_w, vy += fsr2_jy * fabsf(vp[3] * vp_sy) / (float)fsr2_scene_h;
+        else if (pv_pass() && pv_note() && (fsr2_jx != 0 || fsr2_jy != 0))  // (the clothing screen's character: its own pixels)
+            vx += fsr2_jx * vw / (float)st.rt.color[0]->width, vy += fsr2_jy * fabsf(vp[3] * vp_sy) / (float)st.rt.color[0]->height;
         set_viewport(vx, vy, vw, vp[3] * vp_sy, zn, zf);
         if (g_debug_frame) {
             VkRect2D sr = scissor_rect();
@@ -8423,6 +8741,8 @@ static void draw_(CmdRec *r, bool indexed) {
     else pl_dc.a = count, pl_dc.b = run_n[0], pl_dc.c = first, pl_dc.e = base_inst + run_at[0];
     if (nruns == 1 && !raster_discard && planar_on())  // (the G-buffer's draws, kept to be drawn again mirrored)
         planar_capture(pr, pp, vl.used_streams, sets, ndyn, dyn, nv_dyn, gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem), &pl_dc);
+    if (nruns == 1 && !raster_discard)  // (the characters' draws, kept to be drawn again into the motion vectors)
+        objmv_capture(pr, pp, vl.used_streams, sets, ndyn, dyn, nv_dyn, gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem), &pl_dc);
     for (int ri = 0; ri < nruns; ri++) {
         if (nruns > 1 || run_gold[0]) {  // this run's tint: a fragment set of its own
             float rtint[RECOLOUR_TINT_FLOATS] = {0};
@@ -9907,9 +10227,10 @@ static VkImageView post_view(TexBackend *d) {
 // is copied into the shown image. The scene can be drawn smaller, in the top-left part of its images (F1 > FSR 2 render
 // resolution, vk_taa_render_share): FSR 2 then upscales it to the whole shown image. Not with Dynamic resolution.
 
-// Its images (kept until the size changes): 0 motion vectors (RG16F), 1 reactive mask (R8), 2 FSR 2's output (RGBA8)
+// Its images (kept until the size changes): 0 motion vectors (RG16F), 1 reactive mask (R8), 2 FSR 2's output (RGBA8);
+// 3-6 pv_resolve's
 static TexBackend *fsr2_image(int i, VkFormat f, uint32_t w, uint32_t h, VkImageUsageFlags usage) {
-    static TexBackend img[3];
+    static TexBackend img[7];
     TexBackend *d = &img[i];
     if (d->image && (d->width != w || d->height != h)) {
         vk_views_forget(d);
@@ -10121,6 +10442,12 @@ static bool fsr2_copy(Prog *pr) {
     rec_CmdDraw(cb, 3, 1, 0, 0);
     rec_CmdEndRendering(cb);
     vk_full_barrier(cb);
+    objmv_check(sb, mvb, w, h, true);
+    cb = vk_cmd();  // (the check may have submitted the command buffer)
+    objmv_replay(mvb, zv, w, h);  // (DLAA: the characters' own motion over the camera's)
+    vk_full_barrier(cb);
+    objmv_check(sb, mvb, w, h, false);
+    cb = vk_cmd();
     // ---- FSR 2
     static uint64_t last_ns;
     uint64_t now = plat_now_ns();
@@ -10139,6 +10466,7 @@ static bool fsr2_copy(Prog *pr) {
     if (kind != last_kind) fr.reset = true, last_kind = kind;
     VkCommandBuffer sec = fsr2_cmd();
     bool ok = kind == TAA_DLAA ? vk_dlaa_record(g_vk.dev, sec, &fr)
+              : kind == TAA_FSR4 ? vk_fsr4_record(g_vk.phys, g_vk.dev, sec, &fr)
               : kind == TAA_FSR3 ? vk_fsr3_record(g_vk.phys, g_vk.dev, sec, &fr) : vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
     VK_CHECK(vkEndCommandBuffer(sec));
     if (!ok) return false;
@@ -10164,11 +10492,185 @@ static bool fsr2_copy(Prog *pr) {
     static int nlog;
     static uint32_t last_w;  // (and each change of the render size)
     if (nlog++ < 3 || w != last_w)
-        LOG("[%s] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", kind == TAA_DLAA ? "dlaa" : kind == TAA_FSR3 ? "fsr3" : "fsr2",
+        LOG("[%s] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", kind == TAA_DLAA ? "dlaa" :
+            kind == TAA_FSR4 ? "fsr4" : kind == TAA_FSR3 ? "fsr3" : "fsr2",
             (unsigned long long)f, w, h, ow, oh, fsr2_jx, fsr2_jy, fr.reset ? ", reset" : "");
     last_w = w;
     fsr2_ok_frame = f;
     return true;
+}
+
+// A full-screen pipeline of pv_resolve: frag (a built-in shader) reading nimg sampled images (+ a uniform buffer at
+// binding nimg) into nfmt colour targets
+static VkPipeline pv_pipeline(const char *frag, int nimg, bool ubo, const VkFormat *fmts, int nfmt, VkDescriptorSetLayout *dsl,
+                              VkPipelineLayout *layout) {
+    VkDescriptorSetLayoutBinding bd[4];
+    int nb = 0;
+    for (int i = 0; i < nimg; i++) bd[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    if (ubo) bd[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)nimg, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = (uint32_t)nb, .pBindings = bd};
+    VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, dsl));
+    VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = dsl};
+    VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, layout));
+    VkPipelineShaderStageCreateInfo stages[2] = {
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = vk_builtin_shader("post.vert"), .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = vk_builtin_shader(frag), .pName = "main"}};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                 .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineViewportStateCreateInfo vs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                 .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                               .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState cba[2] = {{.colorWriteMask = 0xF}, {.colorWriteMask = 0xF}};
+    VkPipelineColorBlendStateCreateInfo cbs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                                               .attachmentCount = (uint32_t)nfmt, .pAttachments = cba};
+    VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    uint32_t ndyn = 2;
+    fullscreen_vertex_dyn(dyn, &ndyn, 3);
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = ndyn, .pDynamicStates = dyn};
+    VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = (uint32_t)nfmt,
+                                        .pColorAttachmentFormats = fmts};
+    VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2,
+                                       .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
+                                       .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
+                                       .pColorBlendState = &cbs, .pDynamicState = &dy, .layout = *layout};
+    VkPipeline p;
+    VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
+    return p;
+}
+
+// draws pipe's full-screen triangle into the w x h targets
+static void pv_draw(VkCommandBuffer cb, VkPipeline pipe, VkPipelineLayout layout, VkDescriptorSet set, const VkImageView *views, int n,
+                    uint32_t w, uint32_t h) {
+    VkRenderingAttachmentInfo ca[2];
+    for (int i = 0; i < n; i++)
+        ca[i] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = views[i],
+                                            .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                            .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo rinfo = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {w, h}}, .layerCount = 1,
+                             .colorAttachmentCount = (uint32_t)n, .pColorAttachments = ca};
+    rec_CmdBeginRendering(cb, &rinfo);
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, NULL);
+    VkViewport vp = {0, 0, (float)w, (float)h, 0, 1};
+    VkRect2D sc = {{0, 0}, {w, h}};
+    rec_CmdSetViewport(cb, 0, 1, &vp);
+    rec_CmdSetScissor(cb, 0, 1, &sc);
+    fullscreen_vertex_bind(cb);
+    rec_CmdDraw(cb, 3, 1, 0, 0);
+    rec_CmdEndRendering(cb);
+}
+
+static void pv_set_images(VkDescriptorSet set, const VkImageView *views, int n, const VkDescriptorBufferInfo *ubo) {
+    VkDescriptorImageInfo ii[3];
+    VkWriteDescriptorSet wr[4];
+    VkSampler near = vk_default_sampler(false);
+    for (int i = 0; i < n; i++) {
+        ii[i] = (VkDescriptorImageInfo){near, views[i], VK_IMAGE_LAYOUT_GENERAL};
+        wr[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = (uint32_t)i,
+                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[i]};
+    }
+    if (ubo)
+        wr[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = (uint32_t)n,
+                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = ubo};
+    rec_UpdateDescriptorSets((uint32_t)n + (ubo ? 1 : 0), wr);
+}
+
+// (CMD_SET_RENDER_TARGETS) the menu is leaving the character's image: DLSS resolves it now, before the scene's
+// passes reuse the depth and before the menu draws it
+static void pv_resolve(void) {
+    extern uint64_t vk_frame_counter(void);
+    uint64_t f = vk_frame_counter();
+    pv_cur.done = true;
+    NvnTexture *t = pv_cur.tex, *d = pv_cur.depth;
+    TexBackend *cb = t ? t->backend : NULL, *zb = d ? d->backend : NULL;
+    if (!cb || !cb->image || !zb || !zb->image || (pv_cur.vp[15] == 0 && pv_cur.vp[11] == 0 && pv_cur.vp[3] == 0)) return;
+    uint32_t w = cb->width, h = cb->height;
+    {
+        static int said;
+        if (pv_cur.mixed && !said++) LOG("[dlaa] clothing screen: the character's parts drawn with other model matrices (motion from the first)\n");
+    }
+    // a cut (another view) or a frame without the image starts its history again
+    bool reset = pv_last_frame + 1 != f || pv_ok_frame + 1 != f;
+    {
+        const float *a = pv_cur.vp, *b = pv_last_vp;
+        float la = sqrtf(a[3] * a[3] + a[7] * a[7] + a[11] * a[11]), lb = sqrtf(b[3] * b[3] + b[7] * b[7] + b[11] * b[11]);
+        if (!(la > 0 && lb > 0) || (a[3] * b[3] + a[7] * b[7] + a[11] * b[11]) / (la * lb) < 0.95f) reset = true;
+    }
+    float u[36];
+    inv4(pv_cur.vp, u);
+    memcpy(u + 16, reset ? pv_cur.vp : pv_last_vp, 64);
+    bool jittered = pv_ok_frame + 1 == f;  // (pv_note: its draws took this frame's jitter)
+    float jx = jittered ? fsr2_jx : 0, jy = jittered ? fsr2_jy : 0;
+    u[32] = jx, u[33] = jy, u[34] = 1.0f / w, u[35] = 1.0f / h;
+    memcpy(pv_last_vp, pv_cur.vp, 64);
+    pv_last_frame = f;
+    vk_end_pass();
+    TexBackend *mvb = fsr2_image(3, VK_FORMAT_R16G16_SFLOAT, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    TexBackend *alb = fsr2_image(4, VK_FORMAT_R8G8B8A8_UNORM, w, h, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    TexBackend *oc = fsr2_image(5, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, VK_IMAGE_USAGE_STORAGE_BIT);
+    TexBackend *oa = fsr2_image(6, VK_FORMAT_R16G16B16A16_SFLOAT, w, h, VK_IMAGE_USAGE_STORAGE_BIT);
+    if (!mvb || !alb || !oc || !oa) return;
+    static const VkComponentMapping id = {0};
+    VkImageView zv = vk_image_view(zb, VK_IMAGE_VIEW_TYPE_2D, zb->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkImageView cv = post_view(cb);
+    if (!zv || !cv) return;
+    static VkPipeline prep, comb;
+    static VkPipelineLayout prep_l, comb_l;
+    static VkDescriptorSetLayout prep_d, comb_d;
+    if (!prep) {
+        VkFormat f1[2] = {VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM};
+        prep = pv_pipeline("pv_prep.frag", 2, true, f1, 2, &prep_d, &prep_l);
+    }
+    static VkFormat comb_fmt;
+    if (!comb || comb_fmt != cb->format) {  // (sRGB or not: the image's own format, once each)
+        VkFormat f2[1] = {cb->format};
+        comb = pv_pipeline("pv_combine.frag", 2, false, f2, 1, &comb_d, &comb_l);
+        comb_fmt = cb->format;
+    }
+    // ---- the motion vectors and the alpha picture
+    VkCommandBuffer c = vk_cmd();
+    vk_full_barrier(c);
+    VkDescriptorSet s1 = vk_alloc_set(prep_d);
+    VkDescriptorBufferInfo bi = ubo_span(vk_transient_copy(u, sizeof u, 256), sizeof u);
+    VkImageView in1[2] = {zv, cv}, out1[2] = {post_view(mvb), post_view(alb)};
+    pv_set_images(s1, in1, 2, &bi);
+    pv_draw(c, prep, prep_l, s1, out1, 2, w, h);
+    vk_full_barrier(c);
+    // ---- DLSS: the colour, then the alpha (features 1 and 2: histories of their own)
+    static uint64_t last_ns;
+    uint64_t now = plat_now_ns();
+    float dt = last_ns ? (float)((now - last_ns) / 1e6) : 16.7f;
+    last_ns = now;
+    VkFsr2Frame fr = {.color = cb->image, .depth = zb->image, .mv = mvb->image, .reactive = mvb->image, .out = oc->image,
+                      .color_view = cv, .depth_view = zv, .mv_view = post_view(mvb), .reactive_view = post_view(mvb),
+                      .out_view = post_view(oc), .color_format = cb->format, .depth_format = zb->format,
+                      .out_format = VK_FORMAT_R16G16B16A16_SFLOAT, .w = w, .h = h, .ow = w, .oh = h, .jx = jx, .jy = jy,
+                      .dt_ms = fminf(fmaxf(dt, 1), 100), .near_z = 0.1f, .fov_y = 1.0f, .reset = reset, .slot = 1};
+    VkCommandBuffer sec = fsr2_cmd();
+    bool ok = vk_dlaa_record(g_vk.dev, sec, &fr);
+    fr.color = alb->image, fr.color_view = post_view(alb), fr.color_format = VK_FORMAT_R8G8B8A8_UNORM;
+    fr.out = oa->image, fr.out_view = post_view(oa), fr.slot = 2;
+    ok = ok && vk_dlaa_record(g_vk.dev, sec, &fr);
+    VK_CHECK(vkEndCommandBuffer(sec));
+    if (!ok) return;  // (not resolved: its next frame takes no jitter)
+    rec_CmdExecuteCommands(c, 1, &sec);
+    vk_full_barrier(c);
+    // ---- back into the character's image
+    VkDescriptorSet s2 = vk_alloc_set(comb_d);
+    VkImageView in2[2] = {post_view(oc), post_view(oa)};
+    pv_set_images(s2, in2, 2, NULL);
+    pv_draw(c, comb, comb_l, s2, &cv, 1, w, h);
+    vk_full_barrier(c);
+    pv_ok_frame = f;
+    static int nlog;
+    if (nlog++ < 3) LOG("[dlaa] clothing screen's character resolved: frame %llu, %ux%u, jitter %.3f %.3f%s\n",
+                        (unsigned long long)f, w, h, jx, jy, reset ? ", reset" : "");
 }
 
 // SMAA's lookup textures (runtime/nvn/smaa_data.c): 0 = area (160 x 560 R8G8), 1 = search (64 x 16 R8), uploaded once.
@@ -11029,6 +11531,498 @@ static void planar_emit(VkCommandBuffer cb, const PlDraw *d, float s, uint32_t w
     e->prev = d;
 }
 
+// ================================================================== per-object motion vectors (DLAA)
+// The temporal anti-aliasing's motion vectors follow the camera only (fsr2_mv.frag): a character that moves on its own
+// gets the camera's motion, and DLSS / FSR keep its history where it was - a trail behind NPCs gesturing or walking.
+// Z-A skins its characters with transform feedback (one program, model-space positions into an arena the draws read
+// as vertex stream 0), at the same arena address every frame, and their draws then place them with constant buffers
+// (camera and object). Each such draw in the scene pass is kept (as planar_capture keeps the G-buffer's), with a second
+// vertex set made around last frame's copies of its constant buffers (kept per arena address); after the camera's
+// motion pass the draws are drawn again with a variant of their vertex shader that runs the original twice - with
+// last frame's positions (a copy of the arena taken at the end of last frame) and constant buffers, then with this
+// frame's - and writes the difference into the motion image where the scene's depth shows the same surface. Measured
+// walking down a street (LARECOMP_OBJMV_CHECK below): warping the last frame by the motion, the error on the characters
+// went from 15.4 (camera motion) to 3.4 (the rest of the picture: 2.5), and standing NPCs got the camera's motion within
+// 0.2 px. Only what is skinned this way: particles, effects and objects moved without bones keep the camera's motion.
+// With DLAA only; LARECOMP_OBJMV=0: off. LARECOMP_OBJMV_EPS: the depth match (relative, default 1e-4).
+typedef struct {
+    Prog *pr;
+    Pipe *pp;
+    uint32_t streams;
+    __typeof__(ss) s;
+    VkDescriptorSet sets[2];  // this frame's vertex set, last frame's
+    uint32_t ndyn, dyn[4 * MAX_BIND];
+    uint32_t off;             // stream 0's offset in the arena (the mirror), bytes
+    PlDrawCall dc;
+} MvDraw;
+static struct {
+    MvDraw *d;
+    int n, cap;
+    uint64_t frame, seq;
+    uint64_t lo, hi;          // the arena range this frame's captured draws read (copied to the previous-frame arena)
+    uint64_t plo, phi;        // last frame's
+    VkBuffer prev;            // the previous frame's arena (as large as the mirror)
+    VmaAllocation prev_mem;
+    uint64_t prev_frame;      // the frame whose arena is in prev
+    uint32_t prev_moves;      // xm_moves when it was copied (the mirror's window moved since: its offsets are stale)
+    int captured, no_prev, replayed, failed, built;  // (the frame's counts, logged)
+} mo;
+
+// last frame's constant buffers, per arena address (one entry per character mesh)
+typedef struct { uint64_t key, size, frame[2]; uint32_t mask, len[2][18], cap[2][18]; uint8_t *data[2][18]; } MvCbuf;
+static MvCbuf mo_cb[2048];
+
+// With DLAA only (FSR 2 / 3.1 read the same motion image but weren't tried with it); LARECOMP_OBJMV=0: off
+static int objmv_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_OBJMV"); on = !e || atoi(e) != 0; }
+    return on && taa_kind() == TAA_DLAA;
+}
+
+// An entry not drawn in the last 2 frames is taken for a new mesh. Without that, the table filled up after travelling
+// to a few areas, and from then on no new character got its motion (a 256-entry test build, walking to another area:
+// ~47 characters' draws a frame drawn again instead of ~147).
+static MvCbuf *mo_cbuf(uint64_t key, uint64_t f) {
+    uint32_t i = (uint32_t)(key ^ (key >> 21)) & 2047;
+    MvCbuf *stale = NULL;
+    for (int k = 0; k < 2048; k++, i = (i + 1) & 2047) {
+        MvCbuf *e = &mo_cb[i];
+        if (e->key == key) return e;
+        if (!e->key) { if (!stale) stale = e; break; }
+        uint64_t last = e->frame[0] > e->frame[1] ? e->frame[0] : e->frame[1];
+        if (!stale && last + 2 < f) stale = e;
+    }
+    if (!stale) return NULL;
+    stale->key = key, stale->size = 0, stale->frame[0] = stale->frame[1] = 0;  // (its buffers are kept, for reuse)
+    return stale;
+}
+
+static void objmv_capture(Prog *pr, Pipe *pp, uint32_t streams, const VkDescriptorSet sets[2], uint32_t ndyn, const uint32_t *dyn,
+                          uint32_t nv_dyn, bool gmem, const PlDrawCall *dc) {
+    if (!objmv_on() || gmem || !xm_buf || !fsr2_scene_pass() || raster_discard) return;
+    if (!st.nstream || ss.vb[0] != xm_buf || !(ss.vb_known & 1) || st.stream[0][0] != 12 || st.stream[0][1]) return;
+    if ((st.attrib[0] & 0xFF) != 0x22 || (st.attrib[0] >> 8 & 0x1F) != 0 || (st.attrib[0] >> 13) != 0) return;
+    if (!pr->vi || !pr->vi->msl || !(pr->vi->attr_mask & 1) || pp->k.samples != 1) return;
+    Range v0 = st.vbuf[0];
+    if (!v0.addr || !v0.size) return;
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    if (mo.frame != f) {
+        mv_unpin(), mo.n = 0;  // (last frame's draws, if never drawn again)
+        mo.frame = f, mo.seq = submit_seq, mv_lost = false;
+        mo.plo = mo.lo, mo.phi = mo.hi;
+        mo.lo = ~0ull, mo.hi = 0;
+        mo.captured = mo.no_prev = 0;
+    }
+    if (mv_lost) return;
+    uint64_t off = ss.vo[0];
+    if (off < mo.lo) mo.lo = off;
+    if (off + v0.size > mo.hi) mo.hi = off + v0.size;
+    // this frame's constant buffers kept for the next; last frame's, if this mesh was drawn then
+    MvCbuf *e = mo_cbuf(v0.addr, f);
+    if (!e) {
+        static int nl;
+        if (nl++ < 5) LOG("[objmv] frame %llu: no room for another mesh (2048 drawn in the last 2 frames)\n", (unsigned long long)f);
+        return;
+    }
+    // (constant buffer k is the state's slot k - 3, as cbuf_info finds it; 0-2 are the driver's own: not the game's)
+    uint32_t mask = pr->vi->cbuf_mask & 0x3FFF8u;
+    int cur = (int)(f & 1), prv = !cur;
+    e->frame[cur] = f;
+    for (int i = 0; i < 18; i++) {
+        if (!(mask >> i & 1)) continue;
+        Range r = st.ubuf[0][i - 3];
+        uint32_t len = r.addr && r.size ? (uint32_t)(r.size < 65536 ? r.size : 65536) : 0;
+        if (len > e->cap[cur][i]) {
+            uint8_t *nd = realloc(e->data[cur][i], len);
+            if (!nd) return;
+            e->data[cur][i] = nd, e->cap[cur][i] = len;
+        }
+        if (len) memcpy(e->data[cur][i], (const void *)(uintptr_t)r.addr, len);
+        e->len[cur][i] = len;
+    }
+    mo.captured++;
+    bool have_prev = e->frame[prv] + 1 == f && e->size == v0.size && mo.prev_frame + 1 == f && mo.prev_moves == xm_moves;
+    e->size = v0.size, e->mask = mask;
+    if (!have_prev) { mo.no_prev++; return; }
+    if (!mv_pin) mv_pin = vk_pending_seq(), mo.seq = submit_seq;  // (its copies stay until objmv_replay)
+    // the vertex set again around last frame's copies
+    Range keep[18];
+    memcpy(keep, st.ubuf[0], sizeof keep);
+    for (int i = 0; i < 18; i++) {
+        if (!(mask >> i & 1) || !e->len[prv][i]) continue;
+        st.ubuf[0][i - 3].addr = (uint64_t)(uintptr_t)e->data[prv][i], st.ubuf[0][i - 3].size = e->len[prv][i];
+    }
+    uint32_t pdyn[2 * MAX_BIND], pn = 0;
+    VkDescriptorSet pset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, pdyn, &pn);
+    memcpy(st.ubuf[0], keep, sizeof keep);
+    if (!pset || pn != nv_dyn || nv_dyn + pn > 4 * MAX_BIND) return;
+    if (mo.n == mo.cap) {
+        int cap = mo.cap ? mo.cap * 2 : 512;
+        MvDraw *d = realloc(mo.d, (size_t)cap * sizeof *d);
+        if (!d) return;
+        mo.d = d, mo.cap = cap;
+    }
+    MvDraw *d = &mo.d[mo.n++];
+    d->pr = pr, d->pp = pp, d->streams = streams, d->s = ss;
+    d->sets[0] = sets[0], d->sets[1] = pset;
+    d->ndyn = nv_dyn + pn;
+    memcpy(d->dyn, dyn, nv_dyn * sizeof *dyn);
+    memcpy(d->dyn + nv_dyn, pdyn, pn * sizeof *pdyn);
+    d->off = (uint32_t)off;
+    d->dc = *dc;
+    (void)ndyn;
+}
+
+// ---- the variant vertex shader (from the translator's GLSL)
+static bool mo_ident(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+typedef struct { char *s; size_t n, cap; } MoStr;
+static void mo_put(MoStr *o, const char *p, size_t n) {
+    if (o->n + n + 1 > o->cap) { o->cap = (o->n + n + 1) * 2; o->s = realloc(o->s, o->cap); }
+    memcpy(o->s + o->n, p, n);
+    o->n += n;
+    o->s[o->n] = 0;
+}
+static void mo_puts(MoStr *o, const char *p) { mo_put(o, p, strlen(p)); }
+
+static char *objmv_glsl(const char *src, uint32_t mask) {
+    if (strstr(src, "push_constant") || strstr(src, "location = 30)") || strstr(src, "location = 31)")) return NULL;
+    const char *m = strstr(src, "\nvoid main()");
+    if (!m) return NULL;
+    m++;
+    MoStr o = {0};
+    mo_put(&o, src, (size_t)(m - src));
+    // last frame's constant buffers: the same blocks in set 1
+    for (const char *l = src; l < m;) {
+        const char *e = strchr(l, '\n');
+        if (!e || e > m) e = m;
+        int b, n, k;
+        if (sscanf(l, "layout(std140, set = 0, binding = %d) uniform CB%d { uvec4 cb%*d[%d]; };", &b, &n, &k) == 3 && b == n &&
+            b >= 0 && b < 18 && (mask >> b & 1)) {
+            char line[160];
+            snprintf(line, sizeof line, "layout(std140, set = 1, binding = %d) uniform PCB%d { uvec4 pcb%d[%d]; };\n", b, b, b, k);
+            mo_puts(&o, line);
+        }
+        l = e + (e < m);
+    }
+    mo_puts(&o, "layout(std430, set = 2, binding = 0) readonly buffer MvPrevPos { float mvpp_[]; };\n"
+                "layout(push_constant) uniform MvPc { uint off; float w, h, eps; } mvpc;\n"
+                "layout(location = 30) out vec4 mv_prev_;\n"
+                "layout(location = 31) out vec4 mv_cur_;\n"
+                "vec4 pa0;\n");
+    // this frame's: main as it was
+    const char *body = m + strlen("void main()");
+    mo_puts(&o, "void mv_cur_main()");
+    mo_puts(&o, body);
+    mo_puts(&o, "\n");
+    // last frame's: a0 and the constant buffers renamed
+    mo_puts(&o, "void mv_prev_main()");
+    const char *p = body;
+    bool first_brace = true;
+    while (*p) {
+        if (*p == '{' && first_brace) {
+            first_brace = false;
+            mo_puts(&o, "{\n  uint mvi_ = mvpc.off / 4u + uint(gl_VertexIndex) * 3u;\n"
+                        "  pa0 = vec4(mvpp_[mvi_], mvpp_[mvi_ + 1u], mvpp_[mvi_ + 2u], 1.0);\n");
+            p++;
+            continue;
+        }
+        if (mo_ident(*p) && (p == body || !mo_ident(p[-1]))) {
+            const char *q = p;
+            while (mo_ident(*q)) q++;
+            size_t n = (size_t)(q - p);
+            int idx;
+            char tail;
+            if (n == 2 && p[0] == 'a' && p[1] == '0') mo_puts(&o, "pa0");
+            else if (n >= 3 && n <= 4 && p[0] == 'c' && p[1] == 'b' && sscanf(p + 2, "%d%c", &idx, &tail) == 2 && idx >= 0 && idx < 18 &&
+                     (mask >> idx & 1) && *q == '[') {
+                mo_puts(&o, "p");
+                mo_put(&o, p, n);
+            } else mo_put(&o, p, n);
+            p = q;
+            continue;
+        }
+        mo_put(&o, p, 1);
+        p++;
+    }
+    mo_puts(&o, "\nvoid main() {\n  mv_prev_main();\n  vec4 p_ = gl_Position;\n  mv_cur_main();\n"
+                "  mv_prev_ = p_;\n  mv_cur_ = gl_Position;\n}\n");
+    return o.s;
+}
+
+static const char *objmv_frag_src =
+    "#version 450\n"
+    "layout(location = 30) in vec4 mp;\n"
+    "layout(location = 31) in vec4 mc;\n"
+    "layout(set = 2, binding = 1) uniform sampler2D sdepth;\n"
+    "layout(push_constant) uniform MvPc { uint off; float w, h, eps; } mvpc;\n"
+    "layout(location = 0) out vec2 mv;\n"
+    "void main() {\n"
+    "  float z = texelFetch(sdepth, ivec2(gl_FragCoord.xy), 0).r;\n"
+    "  if (abs(z - gl_FragCoord.z) > max(1e-7, abs(gl_FragCoord.z) * mvpc.eps)) discard;\n"
+    "  if (mp.w <= 0.0 || mc.w <= 0.0) discard;\n"
+    "  mv = (mp.xy / mp.w - mc.xy / mc.w) * 0.5 * vec2(mvpc.w, -mvpc.h);\n"  // (y: as the camera pass's, fsr2_mv.frag)
+    "}\n";
+
+static VkDescriptorSetLayout mo_set_layout;
+// The variants are built on threads of their own (a vertex shader's: ~5 ms to translate and compile; a pipeline: 30-45
+// ms on an RTX 4060): until a draw's is ready it keeps the camera's motion, as without these. state: 0 building, 1
+// ready, 2 failed.
+typedef struct { Prog *pr; VkShaderModule vs; VkPipelineLayout layout; _Atomic int state; } MoProg;
+static MoProg mo_progs[256];
+typedef struct { Pipe *pp; MoProg *mp; VkPipeline pipe; _Atomic int state; } MoPipe;
+static MoPipe mo_pipes[1024];
+static int mo_nprogs, mo_npipes;
+static VkShaderModule mo_fs;
+static pthread_once_t mo_fs_once = PTHREAD_ONCE_INIT;
+
+static void mo_layout_init(void) {
+    if (mo_set_layout) return;
+    VkDescriptorSetLayoutBinding bd[2] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL},
+                                          {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = bd};
+    VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &mo_set_layout));
+}
+
+static void *mo_build_prog(void *arg) {
+    MoProg *mp = arg;
+    Prog *pr = mp->pr;
+    char *src = objmv_glsl(pr->vi->msl, pr->vi->cbuf_mask & 0x3FFF8u);
+    if (!src) {
+        LOG("[objmv] vertex shader %llx: not one the variant can be made of\n", (unsigned long long)pr->code[0]);
+        atomic_store(&mp->state, 2);
+        return NULL;
+    }
+    size_t nw = 0;
+    uint32_t *spv = vk_glsl_to_spirv(src, STAGE_VERTEX, "objmv vs", &nw);
+    if (ENV("LARECOMP_OBJMV_DUMP")) {
+        mkdir("build/glsl", 0755);
+        char path[96];
+        snprintf(path, sizeof path, "build/glsl/objmv_%llx.vert", (unsigned long long)(uintptr_t)mp);
+        FILE *fo = fopen(path, "w");
+        if (fo) { fputs(src, fo); fclose(fo); }
+    }
+    free(src);
+    if (!spv) {
+        LOG("[objmv] vertex shader %llx: the variant didn't compile\n", (unsigned long long)pr->code[0]);
+        atomic_store(&mp->state, 2);
+        return NULL;
+    }
+    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nw * 4, .pCode = spv};
+    VkResult r = vkCreateShaderModule(g_vk.dev, &mi, NULL, &mp->vs);
+    free(spv);
+    VkDescriptorSetLayout sl[3] = {pr->set_layout[0], pr->set_layout[0], mo_set_layout};
+    VkPushConstantRange pc = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 3, .pSetLayouts = sl,
+                                     .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
+    if (r != VK_SUCCESS || vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &mp->layout) != VK_SUCCESS) {
+        LOG("[objmv] vertex shader %llx: no module or pipeline layout for the variant\n", (unsigned long long)pr->code[0]);
+        atomic_store(&mp->state, 2);
+        return NULL;
+    }
+    mo.built++;
+    atomic_store(&mp->state, 1);
+    return NULL;
+}
+
+static void mo_fs_init(void) {
+    size_t nw = 0;
+    uint32_t *spv = vk_glsl_to_spirv(objmv_frag_src, STAGE_FRAGMENT, "objmv fs", &nw);
+    if (!spv) return;
+    VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nw * 4, .pCode = spv};
+    if (vkCreateShaderModule(g_vk.dev, &mi, NULL, &mo_fs) != VK_SUCCESS) mo_fs = VK_NULL_HANDLE;
+    free(spv);
+}
+
+static void *mo_build_pipe(void *arg) {
+    MoPipe *e = arg;
+    pthread_once(&mo_fs_once, mo_fs_init);
+    PipeCI c;
+    pipe_ci_fill(&c, &e->pp->k);
+    if (!mo_fs || c.nstages != 2) { atomic_store(&e->state, 2); return NULL; }
+    c.stages[0].module = e->mp->vs, c.stages[0].pName = "main", c.stages[0].pSpecializationInfo = NULL;
+    c.stages[1].module = mo_fs, c.stages[1].pName = "main", c.stages[1].pSpecializationInfo = NULL;
+    static const VkFormat rg = VK_FORMAT_R16G16_SFLOAT;
+    c.ri.colorAttachmentCount = 1, c.ri.pColorAttachmentFormats = &rg;
+    c.ri.depthAttachmentFormat = VK_FORMAT_UNDEFINED, c.ri.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+    c.cba[0] = (VkPipelineColorBlendAttachmentState){.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT};
+    c.cb.attachmentCount = 1;
+    c.ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT, c.ms.alphaToCoverageEnable = VK_FALSE;
+    c.pi.layout = e->mp->layout;
+    uint64_t t0 = SDL_GetTicksNS();
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &c.pi, NULL, &pipe) != VK_SUCCESS) pipe = VK_NULL_HANDLE;
+    static _Atomic int nlog;
+    if (atomic_fetch_add(&nlog, 1) < 12)
+        LOG("[objmv] pipeline %s in %.1f ms (in the background)\n", pipe ? "built" : "FAILED", (SDL_GetTicksNS() - t0) / 1e6);
+    e->pipe = pipe;
+    atomic_store(&e->state, pipe ? 1 : 2);
+    return NULL;
+}
+
+static void mo_spawn(void *(*fn)(void *), void *arg) {
+    pthread_t th;
+    if (!pthread_create(&th, NULL, fn, arg)) pthread_detach(th);
+    else fn(arg);
+}
+
+static MoProg *objmv_prog(Prog *pr) {
+    for (int i = 0; i < mo_nprogs; i++) if (mo_progs[i].pr == pr) return &mo_progs[i];
+    if (mo_nprogs == 256) return NULL;
+    mo_layout_init();
+    MoProg *mp = &mo_progs[mo_nprogs++];
+    mp->pr = pr, mp->vs = VK_NULL_HANDLE, mp->layout = VK_NULL_HANDLE;
+    atomic_store(&mp->state, 0);
+    mo_spawn(mo_build_prog, mp);
+    return mp;
+}
+
+// VK_NULL_HANDLE until it is built (it is asked for then)
+static VkPipeline objmv_pipe(MoProg *mp, Pipe *pp) {
+    if (atomic_load(&mp->state) != 1) return VK_NULL_HANDLE;
+    for (int i = 0; i < mo_npipes; i++)
+        if (mo_pipes[i].pp == pp && mo_pipes[i].mp == mp) return atomic_load(&mo_pipes[i].state) == 1 ? mo_pipes[i].pipe : VK_NULL_HANDLE;
+    if (mo_npipes == 1024) return VK_NULL_HANDLE;
+    MoPipe *e = &mo_pipes[mo_npipes++];
+    e->pp = pp, e->mp = mp, e->pipe = VK_NULL_HANDLE;
+    atomic_store(&e->state, 0);
+    mo_spawn(mo_build_pipe, e);
+    return VK_NULL_HANDLE;
+}
+
+// After the camera's motion pass (fsr2_copy, outside any pass): the kept draws into mvb (this frame's motion, render
+// size w x h) where the scene depth (zv) shows them; then this frame's arena range copied for the next frame
+static void objmv_replay(TexBackend *mvb, VkImageView zv, uint32_t w, uint32_t h) {
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    if (!objmv_on() || !xm_buf) return;
+    VkCommandBuffer cb = vk_cmd();
+    int n = mo.frame == f ? mo.n : 0;
+    mo.n = 0;
+    mo.replayed = mo.failed = 0;
+    if (n && submit_seq - mo.seq < SUBS - 4 && mo.prev) {
+        static float eps = -1;
+        if (eps < 0) eps = ENV("LARECOMP_OBJMV_EPS") ? (float)atof(ENV("LARECOMP_OBJMV_EPS")) : 1e-4f;
+        mo_layout_init();
+        VkDescriptorSet set2 = vk_alloc_set(mo_set_layout);
+        if (set2) {
+            VkDescriptorBufferInfo bi = {mo.prev, 0, XM_SIZE};
+            VkDescriptorImageInfo ii = {vk_default_sampler(false), zv, VK_IMAGE_LAYOUT_GENERAL};
+            VkWriteDescriptorSet wr[2] = {
+                {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set2, .dstBinding = 0, .descriptorCount = 1,
+                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi},
+                {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set2, .dstBinding = 1, .descriptorCount = 1,
+                 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii}};
+            rec_UpdateDescriptorSets(2, wr);
+            vk_full_barrier(cb);
+            VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(mvb),
+                                            .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+                                            .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+            VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {w, h}}, .layerCount = 1,
+                                  .colorAttachmentCount = 1, .pColorAttachments = &ca};
+            rec_CmdBeginRendering(cb, &ri);
+            for (int k = 0; k < n; k++) {
+                MvDraw *d = &mo.d[k];
+                MoProg *mp = objmv_prog(d->pr);
+                VkPipeline pipe = mp && mp->state == 1 ? objmv_pipe(mp, d->pp) : VK_NULL_HANDLE;
+                if (!pipe) { mo.failed++; continue; }
+                const __typeof__(ss) *q = &d->s;
+                rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                if (g_vk.vids) set_vertex_input(cb, &q->vi);
+                rec_CmdSetDepthTestEnable(cb, VK_FALSE);
+                rec_CmdSetDepthWriteEnable(cb, VK_FALSE);
+                rec_CmdSetDepthCompareOp(cb, q->dop);
+                rec_CmdSetStencilTestEnable(cb, VK_FALSE);
+                for (int fc = 0; fc < 2; fc++) {
+                    VkStencilFaceFlags face = fc ? VK_STENCIL_FACE_BACK_BIT : VK_STENCIL_FACE_FRONT_BIT;
+                    const uint32_t *v = q->sface[fc];
+                    rec_CmdSetStencilOp(cb, face, (VkStencilOp)v[0], (VkStencilOp)v[1], (VkStencilOp)v[2], (VkCompareOp)v[3]);
+                    rec_CmdSetStencilCompareMask(cb, face, v[4]);
+                    rec_CmdSetStencilWriteMask(cb, face, v[5]);
+                    rec_CmdSetStencilReference(cb, face, v[6]);
+                }
+                rec_CmdSetBlendConstants(cb, q->bc);
+                rec_CmdSetCullMode(cb, q->cull);
+                rec_CmdSetFrontFace(cb, q->ff);
+                rec_CmdSetPrimitiveTopology(cb, q->topo);
+                rec_CmdSetPrimitiveRestartEnable(cb, q->pre);
+                rec_CmdSetDepthBiasEnable(cb, q->dbe);
+                rec_CmdSetDepthBias(cb, q->db[1], q->db[2], q->db[0]);
+                rec_CmdSetViewport(cb, 0, 1, &q->vp);
+                rec_CmdSetScissor(cb, 0, 1, &q->sc);
+                VkDescriptorSet sets[3] = {d->sets[0], d->sets[1], set2};
+                rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, mp->layout, 0, 3, sets, d->ndyn, d->ndyn ? d->dyn : NULL);
+                struct { uint32_t off; float w, h, eps; } pc = {d->off, (float)w, (float)h, eps};
+                rec_CmdPushConstants(cb, mp->layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+                if (d->dc.kind == 1 || (d->dc.kind == 2 && d->dc.indexed)) rec_CmdBindIndexBuffer(cb, q->ib, q->io, q->it);
+                for (int i = 0; i < 17; i++)
+                    if (d->streams & (1u << i)) rec_CmdBindVertexBuffers(cb, (uint32_t)i, 1, &q->vb[i], &q->vo[i]);
+                if (d->dc.kind == 2) rec_CmdDrawIndirect(cb, d->dc.buf, d->dc.off, 1, d->dc.a, d->dc.indexed);
+                else if (d->dc.kind == 1) rec_CmdDrawIndexed(cb, d->dc.a, d->dc.b, 0, d->dc.d, d->dc.e);
+                else rec_CmdDraw(cb, d->dc.a, d->dc.b, d->dc.c, d->dc.e);
+                mo.replayed++;
+            }
+            rec_CmdEndRendering(cb);
+            vk_full_barrier(cb);
+            ss_forget();
+        }
+    }
+    // this frame's arena, for the next frame's motion (after the draws above read last frame's)
+    if (!mo.prev) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = XM_SIZE,
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &mo.prev, &mo.prev_mem, NULL) != VK_SUCCESS) mo.prev = VK_NULL_HANDLE;
+    }
+    if (mo.prev && mo.frame == f && mo.hi > mo.lo && mo.hi <= XM_SIZE) {
+        vk_full_barrier(cb);
+        VkBufferCopy c = {mo.lo, mo.lo, mo.hi - mo.lo};
+        rec_CmdCopyBuffer(cb, xm_buf, mo.prev, 1, &c);
+        vk_full_barrier(cb);
+        mo.prev_frame = f, mo.prev_moves = xm_moves;
+    }
+    mv_unpin();  // (the copies kept for the draws: until this submission is done)
+    static int nlog;
+    static uint64_t last_log;
+    uint64_t now = SDL_GetTicksNS();
+    if (nlog < 2 || now - last_log > 60000000000ull) {
+        nlog++, last_log = now;
+        LOG("[objmv] frame %llu: %d character draws kept (%d without last frame's), %d drawn again, %d without a variant; "
+            "arena %llx-%llx copied; %d variants built\n", (unsigned long long)f, mo.captured, mo.no_prev, mo.replayed, mo.failed,
+            (unsigned long long)mo.lo, (unsigned long long)mo.hi, mo.built);
+    }
+}
+
+
+// (check) LARECOMP_OBJMV_CHECK=<frame>: that frame's and the next one's picture (the scene drawn, before the temporal
+// anti-aliasing) and motion image, raw, to build/objmv_chk<0|1>_{color,mv}.bin (tools: warp the first by the second's
+// motion and compare with the second)
+static void objmv_check(TexBackend *sb, TexBackend *mvb, uint32_t w, uint32_t h, bool cam) {
+    static long at = -2;
+    if (at == -2) at = ENV("LARECOMP_OBJMV_CHECK") ? atol(ENV("LARECOMP_OBJMV_CHECK")) : -1;
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    if (at < 0 || (f != (uint64_t)at && f != (uint64_t)at + 1)) return;
+    int k = (int)(f - (uint64_t)at);
+    TexBackend *img[2] = {sb, mvb};
+    const char *nm[2] = {"color", cam ? "mvcam" : "mv"};  // (cam: the camera's motion alone, before objmv_replay)
+    for (int i = cam ? 1 : 0; i < 2; i++) {
+        uint32_t bpp = i ? 4 : (img[i]->format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4);
+        VkSpan rb = vk_readback((uint64_t)w * h * bpp);
+        VkBufferImageCopy c = {.bufferOffset = rb.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
+        VkCommandBuffer cb = vk_cmd();
+        vk_full_barrier(cb);
+        rec_CmdCopyImageToBuffer(cb, img[i]->image, VK_IMAGE_LAYOUT_GENERAL, rb.buf, 1, &c);
+        renderer_flush();
+        char path[96];
+        snprintf(path, sizeof path, "build/objmv_chk%d_%s.bin", k, nm[i]);
+        FILE *fo = fopen(path, "wb");
+        if (fo) { fwrite(rb.ptr, 1, (size_t)w * h * bpp, fo); fclose(fo); }
+    }
+    LOG("[objmv] check frame %llu (%d): %ux%u, picture format %d, jitter %.4f %.4f\n", (unsigned long long)f, k, w, h,
+        (int)sb->format, fsr2_jx, fsr2_jy);
+}
+
 static void planar_replay_pending(void) {
     extern uint64_t renderer_exec_frame(void);
     uint64_t f = renderer_exec_frame();
@@ -11732,6 +12726,10 @@ static void exec_list(uint64_t handle, int depth) {
             static int always = -1;
             if (always < 0) always = ENV("LARECOMP_VK_PASS_RESTART") != NULL;
             if (always || memcmp(&prev, &st.rt, sizeof prev)) st.rt_dirty = true;
+            // (the clothing screen's character image left: DLAA resolves it - its depth is still the one it was drawn with)
+            if (pv_cur.tex && !pv_cur.done && pv_cur.frame == vk_frame_counter() && prev.color[0] == pv_cur.tex &&
+                st.rt.color[0] != pv_cur.tex)
+                pv_resolve();
             break;
         }
         case CMD_SET_VIEWPORTS:

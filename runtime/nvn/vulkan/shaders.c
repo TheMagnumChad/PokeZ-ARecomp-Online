@@ -364,6 +364,44 @@ static const char *builtin_src(const char *name, int *stage) {
                "  rx = (s & 0xF0u) == 0x30u ? u.react.x : s == 2u ? u.react.y : 0.0;\n"
                "}\n";
     }
+    // DLAA for the clothing screen's character (exec.c pv_resolve), before DLSS: its motion vectors as fsr2_mv's, through
+    // the character's own transform (camera x its model matrix: the camera stays, the model turns), none where nothing
+    // was drawn (alpha 0); and its alpha as a grey picture, resolved by a DLSS feature of its own.
+    if (!strcmp(name, "pv_prep.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D dep;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D col;\n"
+               "layout(set = 0, binding = 2) uniform U { mat4 inv_cur; mat4 prev; vec4 jit; } u;\n"
+               "layout(location = 0) out vec2 mv;\n"
+               "layout(location = 1) out vec4 al;\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  float a = texelFetch(col, p, 0).a;\n"
+               "  al = vec4(a, a, a, 1.0);\n"
+               "  if (a <= 0.0) { mv = vec2(0.0); return; }\n"
+               "  float d = max(texelFetch(dep, p, 0).r, 1e-7);\n"
+               "  vec2 uv = (gl_FragCoord.xy - u.jit.xy) * u.jit.zw;\n"
+               "  vec4 c = u.prev * (u.inv_cur * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d, 1.0));\n"
+               "  vec2 puv = vec2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);\n"
+               "  mv = c.w > 0.0 ? (puv - uv) / u.jit.zw : vec2(0.0);\n"
+               "}\n";
+    }
+    // After DLSS: the colour (black where nothing was drawn: alpha-weighted already) and the alpha, each resolved, back
+    // into the character's image as colour / alpha - the game blends it with SRC_ALPHA, ONE_MINUS_SRC_ALPHA.
+    if (!strcmp(name, "pv_combine.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D oc;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D oa;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  float a = clamp(texelFetch(oa, p, 0).r, 0.0, 1.0);\n"
+               "  vec3 c = max(texelFetch(oc, p, 0).rgb, vec3(0.0));\n"
+               "  o = a > 1.0 / 512.0 ? vec4(min(c / a, vec3(1.0)), a) : vec4(0.0);\n"
+               "}\n";
+    }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
     // Each draws a fullscreen triangle into an image the size of its output; push constants: two vec4.
     if (!strcmp(name, "post.vert")) {
@@ -1287,6 +1325,22 @@ static const char *builtin_src(const char *name, int *stage) {
                "  if (i >= pc.n) return;\n"
                "  uint v = f[pc.src + i], w = o[pc.src + i];\n"
                "  if (v != w && (pc.cpu_wins == 0u || h[pc.dst + i] == w)) h[pc.dst + i] = v;\n"
+               "}\n";
+    }
+    // (exec.c snap_merge_back) a storing dispatch's writes into a storage snapshot, back to the original - all three in
+    // the guest heap: the words the dispatch changed (copy vs its pristine image) that the CPU didn't rewrite meanwhile
+    // (the original still the image's), and the image follows them, so the next dispatch's changes are told the same way
+    if (!strcmp(name, "snap_merge.comp")) {
+        *stage = STAGE_COMPUTE;
+        return "#version 450\n"
+               "layout(local_size_x = 256) in;\n"
+               "layout(std430, set = 0, binding = 0) buffer H { uint h[]; };\n"
+               "layout(push_constant) uniform P { uint copy; uint pristine; uint dst; uint n; } pc;\n"
+               "void main() {\n"
+               "  uint i = gl_GlobalInvocationID.x;\n"
+               "  if (i >= pc.n) return;\n"
+               "  uint v = h[pc.copy + i], w = h[pc.pristine + i];\n"
+               "  if (v != w && h[pc.dst + i] == w) { h[pc.dst + i] = v; h[pc.pristine + i] = v; }\n"
                "}\n";
     }
     // (exec.c ia_refresh) GPU-filled indirect draw parameters copied out of the guest heap (g) into private records, the

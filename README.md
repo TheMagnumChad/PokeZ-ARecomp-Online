@@ -33,6 +33,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - [Controls](#controls)
 - [Saves](#saves)
 - [Mods](#mods)
+- [Multiplayer (test)](#multiplayer-test)
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
 - [Developer tools](#developer-tools)
@@ -57,6 +58,8 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 
 **Graphics** (all optional, off by default)
 - Upscaling with AMD FSR 1, anti-aliasing with SMAA or AMD FSR 2 (temporal), sharpening
+- Optional AMD FSR 4.1.2 temporal upscaling on Linux with a user-supplied FidelityFX provider (RDNA4; see
+  [docs/linux.md](docs/linux.md#fsr-412-temporal-upscaling-optional-linux))
 - HDR output (HDR10 / scRGB)
 - Ambient occlusion (GTAO), indirect light (screen-space GI) and water reflections
 - Sharper shadows (higher shadow map resolution) and high-quality texture filtering
@@ -68,7 +71,8 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 - Any SDL3 controller: Xbox, PlayStation (DualShock 4 / DualSense), Switch Pro, Steam Deck and more
 - Keyboard and mouse, with a mouse-driven camera
 - Every button and key can be rebound; button icons match your controller (Xbox, PlayStation, Nintendo, Steam Deck,
-  keyboard)
+  keyboard). Xbox / PlayStation / Steam pads use their own A/B/X/Y labels; Nintendo pads keep the Switch positions
+- In the name entry, A types, B deletes, Start / Menu confirms (or select OK); on-screen keyboard for any connected pad
 - Battle moves by position, right stick snap to axis
 
 **Start screen**
@@ -85,7 +89,7 @@ It is built on **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai
 | **GPU** | Vulkan 1.2 or newer (1.3 recommended) with an up-to-date driver. With the DirectX 12 option: a DirectX 12 card (feature level 11_0, shader model 6.0) |
 | **RAM** | 8 GB (16 GB recommended) |
 | **Disk** | About 12 GB free |
-| **Game** | Pokémon Legends: Z-A **1.0.0, 2.0.0 or 2.0.2**, optionally with the *Mega Dimension* DLC |
+| **Game** | Pokémon Legends: Z-A **1.0.0, 2.0.0 or 2.0.2**, optionally with the *Mega Dimension* DLC; a `.nup` whose update is one of these also works |
 
 Linux runs natively (x86-64, no Wine or Proton) as an **experimental** build: see [Linux (experimental)](#linux-experimental).
 On a Mac, use [MonZaMac](https://github.com/lucabravi/MonZaMac) by
@@ -97,8 +101,8 @@ On a Mac, use [MonZaMac](https://github.com/lucabravi/MonZaMac) by
    and extract it to a folder of your choice (for example `C:\Games\ZA Recomp`).
 2. Prepare your own copy of the game in a folder, in one of two ways:
    - **Extracted game**: the `exefs` and `romfs` folders, as an emulator or your Switch extracts them. No keys needed.
-   - **Dump**: the base game (`.xci` or `.nsp`), optionally the update and the *Mega Dimension* DLC (`.nsp`), together with the
-     `prod.keys` from your own Switch.
+   - **Dump**: the base game (`.xci`, `.nsp` or `.nup`), optionally the update and the *Mega Dimension* DLC (`.nsp`).
+     `.xci` / `.nsp` packages need the `prod.keys` from your own Switch; a `.nup` needs no keys.
 3. Run `lasrecomp.exe`. On the start screen, choose that folder (or drag it onto the window) and click
    **Set up the game**.
 4. The game's files are read and its code is compiled for your PC. This takes 10 to 30 minutes depending on your CPU
@@ -110,13 +114,24 @@ for the original text and button icons; without them a substitute font is used.
 
 ### Mega Dimension DLC
 
-The DLC is supported through the **dump** route (the extracted `exefs` / `romfs` folders don't include it):
+The DLC is supported through the **dump** route (the extracted `exefs` / `romfs` folders don't include it); a `.nup` can be used too:
 
-1. Put these files together in one folder: the base game (`.xci` or `.nsp`), the **update** (`.nsp`, version 2.0.0 or
-   newer - the DLC's content comes with it), the **DLC** (`.nsp`) and the `prod.keys` from your Switch (plus
-   `title.keys` if the start screen asks for it).
+1. Put these files together in one folder: the base game (`.xci`, `.nsp` or `.nup`), the **update** (optional for a
+   `.nup`; the `.xci` / `.nsp` update `.nsp`, version 2.0.0 or newer - the DLC's content comes with it), the **DLC**
+   (`.nsp`) and, for `.xci` / `.nsp`, the `prod.keys` from your Switch (plus `title.keys` if the start screen asks for it).
 2. Choose that folder on the start screen and click **Set up the game**.
 3. The start screen shows **+ DLC** next to the game version when it was found.
+
+### Nintendo Switch 2 Edition and `.nup`
+
+A `.nup` (the clean-room package used by newer Switch 2 dumps) can be selected directly: put the `.nup` in a folder and
+choose that folder on the start screen. **No `prod.keys` are needed for a `.nup`.** The start screen reads its base and
+update trees; use the **2.0.2** update for Lumiose Online. The Switch 2 Edition upgrade add-on
+(`0100F43008C45001`) is installed so the game sees its entitlement (its RomFS is a placeholder), and the port's 60 fps /
+resolution / camera options provide the visual side of the edition. The *Mega Dimension* DLC is separate: put its
+DLC 2 `.nsp` (`0100F43008C45002`) and your `prod.keys` / `title.keys` in the same folder; the start screen shows
+**+ DLC**. The game data is kept as a `romfs/` folder, so the button icons and the Xbox battle layout are made from it
+just like from an extracted game.
 
 Already set up without the DLC? Click **Change game folder**, choose the folder again with the DLC added and set it up
 again. Your saves and settings are kept.
@@ -240,6 +255,70 @@ Menus and dialogue were checked on game version 2.0.2 in an offline test. The tr
 versions 1.0 and 1.0.1: later-game content, DLC and online play have not been fully verified and may not be translated
 or may have compatibility problems. The translation is not included with the launcher.
 
+## Multiplayer (test)
+
+> **This is a test feature.** It may not connect on every network, and it may change or be removed in a later
+> version. Please report how it works for you.
+
+Pokémon Legends Z-A's **Link Play** (link trades and private battles) works between two copies of ZA Recomp, with no
+server and no account.
+
+**Same network (home LAN, or a virtual LAN like Radmin VPN / ZeroTier / Hamachi):** nothing to set up. In the game,
+**Link Play > Nearby Players** finds the other PC as it would find a nearby Switch. Then use the game's own link code
+or room passcode, as on the console.
+
+**Over the internet:**
+1. Both players open **F1 > Online** in game and copy **Your code** (A / click copies it).
+2. Send it to your friend (WhatsApp, Discord...) and paste theirs with **Paste friend's code** (it's read from the
+   clipboard). Both of you have to paste the other's code.
+3. Wait for **Status: Connected**, usually within a minute. Then use **Link Play > Nearby Players** in the game as
+   above.
+
+If it says **Didn't connect**, one of the two networks blocks direct connections (some mobile networks and
+corporate routers). A virtual LAN (Radmin VPN, ZeroTier, Hamachi) works around that, and then no codes are needed.
+
+### How it works
+
+- **Local wireless, emulated:** the Switch's local wireless and the game's network sockets are re-created on top of
+  normal UDP on your PC (ports 47810-47817 on a LAN). The game sends and receives the same data it would on a console.
+- **Connection codes:** your code holds your public internet address and port, as seen from outside (learned from
+  public STUN servers: Google, Cloudflare), plus a random **session token** made when the game starts.
+- **No server in the middle:** after both codes are pasted, the two games send packets straight to each other until
+  both routers let them through ("hole punching"). They try at fixed times of the clock, using the time from public
+  NTP servers (Cloudflare, Google, pool.ntp.org), so the PCs' own clocks don't need to be right. No ports to forward
+  and nothing changed on your router.
+- **What is sent:** only what the game itself sends during Link Play (the trade or battle data, as on the console).
+  Your save file, your game files and your keys never leave your PC.
+
+### Security
+
+- **Your code shows your IP address.** Share it only with the person you're playing with, as with any direct
+  (peer-to-peer) game. Codes change every time the game starts, and nothing listens on the internet once the game is
+  closed.
+- **Friends only:** over the internet, the game only accepts players whose code you pasted. Every packet is signed
+  (HMAC-SHA1) with a key made from both players' session tokens. Packets from anyone else, or that fail the check,
+  are dropped before the game sees them, and so are floods (over 4000 packets a second).
+- **Signed, not encrypted:** nobody else can inject or change what you send, but the trade data itself isn't hidden
+  from someone who can watch your traffic (your network or internet provider). It is the game's own trade data, so
+  nothing personal.
+- **Same network:** local play isn't signed, just like a Switch's local wireless. Anyone on your LAN or virtual LAN can
+  see your room, and the game's own link code or passcode decides who gets in.
+- **Trust who you play with:** the other player's game sends data that your game processes, as on a console. Play
+  with people you know.
+- No accounts, no data sent to us: the project has no server at all. The only outside services used are the public
+  STUN and NTP servers above, which see your address and nothing else.
+
+### Why it works this way (and why there's no ranked mode)
+
+- **Ranked battles, random matchmaking and "Faraway Players" trades need a server** that is always online: to find
+  opponents you don't know, keep rankings and check results. In the original game those run on Nintendo's servers,
+  which a PC port can't (and shouldn't) use.
+- **ZA Recomp has no servers and doesn't ask for donations or any money.** Running a public server costs money every
+  month and needs someone to keep it up and secure, so there is no ranked or matchmaking mode, and none is planned for
+  now.
+- **What you can do today:** link trades and private battles with friends, game to game, over the internet or on the
+  same network, using the steps above. Nothing in between can go offline, and nobody but your friend is involved.
+
 ## DirectX 12
 
 ZA Recomp normally runs on your graphics card's **Vulkan** driver. On Windows it can also run the same renderer on the
@@ -262,6 +341,12 @@ card's **DirectX 12** driver, which helps where the Vulkan driver crashes or mis
   **Settings > Video > Compatibility** and turn the options off one at a time. They apply from the next start.
 - **The game crashes on Vulkan** (often on AMD cards): try **F1 > Display > Graphics API: DirectX 12**
   ([DirectX 12](#directx-12)).
+- **AMD Radeon RX 9000 (RDNA4) with Mesa 27.0-devel**: older mesa-git builds crashed inside `libvulkan_radeon` at
+  the game's first draw because RADV 27 only initialized its PS epilog shader cache when a dynamic-state extension
+  feature bit was set; Vulkan 1.3 has extended dynamic state 1 in core, so no bit was set. The renderer now enables
+  the promoted `VK_EXT_extended_dynamic_state` feature on RADV 1.3 devices as well, which makes it initialize the cache.
+  Mesa 26.2.6 (stable) and current mesa-git both work; no stable-driver downgrade is needed. See
+  [docs/linux.md](docs/linux.md#amd-rdna4-and-mesa-270-devel).
 - **Low frame rate**: lower the internal resolution or turn on Dynamic resolution, and turn off the optional graphics
   features.
 
@@ -307,7 +392,7 @@ The [developer tools guide](docs/dev-tools.md) covers setup and how to use each 
   system documentation.
 - **Libraries**: [SDL 3](https://libsdl.org), [FFmpeg](https://ffmpeg.org), [Dear ImGui](https://github.com/ocornut/imgui),
   [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator),
-  [shaderc](https://github.com/google/shaderc), [SMAA](https://github.com/iryoku/smaa),
+  [shaderc](https://github.com/google/shaderc), [SMAA](https://github.com/iryoku/smaa), [ZstdSharp](https://github.com/oleg-st/ZstdSharp),
   [AMD FidelityFX FSR 1 and FSR 2](https://github.com/GPUOpen-Effects), [XeGTAO](https://github.com/GameTechDev/XeGTAO),
   [LibHac](https://github.com/Thealexbarney/LibHac), [Zig](https://ziglang.org) and the others listed in
   [docs/LASRecomp-README.md](docs/LASRecomp-README.md#license).

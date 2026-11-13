@@ -2,7 +2,8 @@
 //
 // Both go through the player's bindings (runtime/hle/bindings.c, defaults there: keyboard WASD left stick, arrows
 // d-pad, Space/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus / Minus, numpad 8/4/5/6 right stick;
-// controller by position, Switch A = east).
+// controller: Switch A = east for a Nintendo pad, but A = the pad's own A (south) for Xbox / PlayStation pads, whose
+// prompts the menus and the game show by label).
 #include <SDL3/SDL.h>
 #include <ctype.h>
 #include <math.h>
@@ -19,6 +20,8 @@
 #include "../led.h"
 #include "../ui/menu.h"
 #include "lumiose_chat_bridge.h"
+
+int input_pad_family(void);  // (bindings.c/input.c: LARECOMP_PAD_TYPE, else the connected pad)
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
@@ -195,10 +198,28 @@ static void recompute_keyboard(void) {
 }
 
 // Controller buttons (and the triggers as buttons) -> Switch buttons through g_bind_pad; the sticks stay the sticks.
+static _Atomic int pad_family;
 static bool pad_by_pos;  // (battle_abxy_position: ZL held at the last recompute_pad)
-static int pad_host(int i, bool by_pos) { return by_pos && i <= BIND_Y ? bind_pad_default(i) : g_bind_pad[i]; }
+static bool pad_face_by_label;  // (Xbox / PlayStation pad, default bindings: A/B/X/Y by the pad's labels)
+static int pad_host(int i, bool by_pos) {
+    if (i <= BIND_Y) {
+        if (by_pos) return bind_pad_default(i);  // (Nintendo positions: A east, B south, X north, Y west)
+        if (pad_face_by_label) {  // (SDL positions: A south, B east, X west, Y north)
+            static const int label[BIND_Y + 1] = {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST,
+                                                   SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_NORTH};
+            return label[i];
+        }
+    }
+    return g_bind_pad[i];
+}
 static void recompute_pad(void) {
     uint32_t host = test_pad;
+    pad_face_by_label = input_pad_family() != 0 && bind_is_default(BIND_DEV_PAD);
+    static bool label_logged;
+    if (pad_face_by_label && !label_logged) {
+        label_logged = true;
+        LOG("[input] ABXY by the pad's labels (A = south, B = east, X = west, Y = north)\n");
+    }
     if (pad && !host_test) {
         for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
             if (SDL_GetGamepadButton(pad, (SDL_GamepadButton)i)) host |= 1u << i;
@@ -223,6 +244,31 @@ static void recompute_pad(void) {
         pad_ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
         rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
         ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+    }
+    // Left stick dead zone + steadiness (pad only): the stick went to the game raw, and the game picks walk or run from
+    // its length, so a pad whose stick wobbles by a few hundred around that threshold flipped walk <-> run every frame.
+    // A radial dead zone (lstick_deadzone, percent, default 10, 0 = off) is cut off and the rest rescaled to the full
+    // range; a pad's stick often stops short of full travel on the diagonals (85-90%) and never reached the game's run
+    // threshold, so from lstick_outer (default 90) up it reads as full. Then a length that moved less than ~2% from the
+    // last one keeps the last (the direction always follows), so noise can't carry it back and forth over the
+    // threshold. Keyboard and d-pad values are not touched.
+    if (pad && !host_test) {
+        static double last_m;
+        int dz_pct = g_settings.lstick_deadzone, out_pct = g_settings.lstick_outer;
+        if (out_pct < dz_pct + 10) out_pct = dz_pct + 10;
+        if (dz_pct > 0) {
+            double x = pad_lx, y = pad_ly, m = sqrt(x * x + y * y), dz = 32767.0 * dz_pct / 100, outer = 32767.0 * out_pct / 100;
+            if (m <= dz) m = 0;
+            else {
+                double n = (m - dz) / (outer - dz) * 32767.0;  // (the length, rescaled)
+                if (n > 32767) n = 32767;
+                if (fabs(n - last_m) < 650 && n < 32000) n = last_m;  // (near full tilt it still reaches the end)
+                x *= n / m, y *= n / m;
+                m = n;
+            }
+            last_m = m;
+            pad_lx = (int32_t)lround(m ? x : 0), pad_ly = (int32_t)lround(m ? y : 0);
+        }
     }
     // rstick_snap: a stick pushed sideways also reads a little up or down (an Xbox One pad: 4 degrees on average, up
     // to 12), and the camera tilts with it. That close to an axis the stick is put on the axis; the angles in between
@@ -488,7 +534,6 @@ int input_family_of_type(int type) {
     default: return 1;
     }
 }
-static _Atomic int pad_family;
 static void note_family(void) {
     int f = pad ? input_family_of_type(SDL_GetGamepadType(pad)) : 0;
     if (f != pad_family) LOG("[input] button prompts: %s controller\n", f == 1 ? "Xbox" : f == 2 ? "PlayStation" : "Nintendo");

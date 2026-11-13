@@ -39,6 +39,7 @@ extern "C" {
 #include "paths.h"
 #include "gamebuild.h"
 #include "gamelib.h"
+#include "update_marker.h"
 #include "romfs_build.h"
 #include "settings.h"
 #include "input_bind.h"
@@ -86,8 +87,9 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 #endif
 
 static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0xcb};  // Link's Awakening v1.0.0 main
-// Pokémon Legends Z-A's main builds (tools/patches.py ZA_BUILDS): set up from the player's .xci / .nsp and keys by the
-// bundled tools/zaimport (no extracted folder), no romfs/ copy - the game reads romfs.bin (+ aoc/ for the DLC)
+// Pokémon Legends Z-A's main builds (tools/patches.py ZA_BUILDS): set up from the player's .xci / .nsp and keys, or
+// a .nup without keys, by the bundled tools/zaimport. A .xci/.nsp becomes romfs.bin, a .nup becomes a romfs/ folder
+// (the game reads either), plus aoc/ for the DLC and the Switch 2 Edition add-on
 static const struct { uint8_t id[8]; const char *version; } ZA_BUILDS[] = {
     {{0x72, 0x22, 0xe1, 0x3e, 0xcf, 0x6a, 0xdb, 0x32}, "1.0.0"},
     {{0x8a, 0x1c, 0x86, 0xc4, 0x37, 0x39, 0x4b, 0x69}, "2.0.0"},
@@ -144,6 +146,11 @@ static std::string tag_label(const std::string &t, bool with_word) {
 static std::string g_update_tag;  // a newer release's tag (g_update_lock)
 static std::string g_update_url;  // its Windows zip (browser_download_url: the download counts on GitHub as a click)
 static long long g_update_size;
+// Whether that release rebuilds the game code: its notes carry "<!-- zarecomp-gamelib: <id> -->" (tools/za/dist.sh
+// prints the line), compared with this build's GAMELIB_ID. 1: it rebuilds (10-30 min at the next start), 0: it
+// doesn't, -1: the notes don't say (releases before the marker). The update's question and the link say so.
+static int g_update_rebuild = -1;
+extern "C" const char *gamelib_build_id(void);  // runtime/gamelib.c
 static pthread_mutex_t g_update_lock = PTHREAD_MUTEX_INITIALIZER;
 #ifdef __linux__
 #define UPDATE_ASSET "Lumiose-Online-linux-experimental.zip"
@@ -157,6 +164,8 @@ static void *update_thread(void *) {
         for (const char *p = t; *p;) {
             const char *c = strchr(p, ',');
             body += "\"tag_name\": \"" + std::string(p, c ? c - p : strlen(p)) + "\"\n";
+            if (const char *g = getenv("LARECOMP_UPDATE_GAMELIB"))  // (test) each release's notes give this game-code id
+                body += std::string("\"body\": \"notes <!-- zarecomp-gamelib: ") + g + " -->\"\n";
             p = c ? c + 1 : p + strlen(p);
         }
     } else {
@@ -182,14 +191,18 @@ static void *update_thread(void *) {
     }
     std::string best, url;
     long long best_rank = tag_rank(LARECOMP_VERSION), size = 0;
+    int rebuild = -1;
     for (size_t at = 0; (at = body.find("\"tag_name\"", at)) != std::string::npos;) {
         size_t q1 = body.find('"', body.find(':', at) + 1), q2 = q1 == std::string::npos ? q1 : body.find('"', q1 + 1);
         if (q2 == std::string::npos) break;
         std::string tag = body.substr(q1 + 1, q2 - q1 - 1);
         if (tag_rank(tag) > best_rank) {
-            best_rank = tag_rank(tag), best = tag, url.clear(), size = 0;
+            best_rank = tag_rank(tag), best = tag, url.clear(), size = 0, rebuild = -1;
             // its assets follow the tag in GitHub's release object, up to the next release's tag
             size_t end = body.find("\"tag_name\"", q2), u = q2;
+            // (its notes, in the same object: the game-code id it was built with - runtime/update_marker.h)
+            rebuild = update_notes_rebuild(body.c_str() + q2, (end == std::string::npos ? body.size() : end) - q2,
+                                           gamelib_build_id());
             while ((u = body.find("\"browser_download_url\"", u)) != std::string::npos && u < end) {
                 size_t a = body.find('"', body.find(':', u) + 1), b = a == std::string::npos ? a : body.find('"', a + 1);
                 if (b == std::string::npos) break;
@@ -207,12 +220,14 @@ static void *update_thread(void *) {
     }
     if (const char *z = getenv("LARECOMP_UPDATE_ZIP"))  // (test) install this zip: a local file or a link
         url = strncmp(z, "http", 4) ? std::string("file:") + z : std::string(z), size = getenv("LARECOMP_UPDATE_SIZE") ? atoll(getenv("LARECOMP_UPDATE_SIZE")) : 0;
-    if (!best.empty()) rt_launcher_log("[launcher] update available: %s (this build %s)%s\n", best.c_str(), LARECOMP_VERSION,
-                               url.empty() ? "" : ", installable from the start screen");
+    if (!best.empty()) rt_launcher_log("[launcher] update available: %s (this build %s)%s; game code: %s\n", best.c_str(),
+                               LARECOMP_VERSION, url.empty() ? "" : ", installable from the start screen",
+                               rebuild == 1 ? "rebuilt after updating" : rebuild == 0 ? "kept" : "not said in its notes");
     pthread_mutex_lock(&g_update_lock);
     g_update_tag = best;
     g_update_url = url;
     g_update_size = size;
+    g_update_rebuild = rebuild;
     pthread_mutex_unlock(&g_update_lock);
     return NULL;
 }
@@ -414,8 +429,8 @@ static std::string check_game_files(const std::string &root) {
 }
 
 // ------------------------------------------------------------------ setup (background thread)
-// The player brings their own game files: a folder holding exefs/ and romfs/ (or Pokémon Z-A's .xci / .nsp packages,
-// read by zaimport into exefs/ and romfs.bin). They're copied into the data root (APFS clones / hard links where the
+// The player brings their own game files: a folder holding exefs/ and romfs/ (or Pokémon Z-A's .xci / .nsp / .nup
+// packages, read by zaimport into exefs/ and romfs.bin or romfs/). They're copied into the data root (APFS clones / hard links where the
 // file system allows); the game reads romfs/ in place (runtime/services/fs.c).
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string g_src;           // the picked folder
@@ -452,7 +467,7 @@ static const char *fail_hint(int k, bool pt) {
     static const char *const en[] = {
         "",
         "Choose the folder with your Pok\xc3\xa9mon Legends Z-A game extracted (exefs and romfs folders), or with your "
-        "dump (.xci / .nsp) and your prod.keys.",
+        "dump (.xci / .nsp with your prod.keys, or .nup without keys).",
         "Pok\xc3\xa9mon Legends Z-A's base game isn't among those files. Choose the folder with your own dump.",
         "Make sure there's about 12 GB free and try again.",
         "ZA Recomp runs versions 1.0.0, 2.0.0 and 2.0.2 of the game (base game, or base game + the 2.0.0 or 2.0.2 "
@@ -460,32 +475,70 @@ static const char *fail_hint(int k, bool pt) {
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
         "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub with logs/launcher.log.",
         "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files. Any file "
-        "name works (prod.keys.txt, keys.txt...): it is recognized by what is inside it.",
+        "name works (prod.keys.txt, keys.txt...): it is recognized by what is inside it. Only .nsp / .xci packages "
+        "need them; a .nup does not.",
         "The full reason is in logs/launcher.log, in the data folder."};
     static const char *const ptb[] = {
         "",
         "Escolha a pasta com o seu Pokémon Legends Z-A extraído (pastas exefs e romfs), ou com o seu dump (.xci / .nsp) "
-        "e o seu prod.keys.",
+        "com o seu prod.keys, ou .nup sem keys.",
         "O jogo base de Pokémon Legends Z-A não está entre esses arquivos. Escolha a pasta com o seu próprio dump.",
         "Veja se há uns 12 GB livres e tente de novo.",
         "O ZA Recomp roda as versões 1.0.0, 2.0.0 e 2.0.2 do jogo (jogo base, ou jogo base + atualização 2.0.0 ou 2.0.2).",
         "Faltam arquivos. Escolha a pasta de novo; se acontecer outra vez, faça o dump do jogo de novo.",
         "Veja se há uns 4 GB livres e tente de novo. Se continuar, avise no GitHub com o arquivo logs/launcher.log.",
         "Coloque o prod.keys (e o title.keys) do seu próprio Switch na pasta dos arquivos do jogo. Qualquer nome serve "
-        "(prod.keys.txt, keys.txt...): ele é reconhecido pelo conteúdo.",
+        "(prod.keys.txt, keys.txt...): ele é reconhecido pelo conteúdo. Só pacotes .nsp / .xci precisam delas; um .nup "
+        "não precisa.",
         "O motivo completo está em logs/launcher.log, na pasta de dados."};
     return k >= 1 && k <= 8 ? (pt ? ptb : en)[k] : "";
+}
+// Under Wine / Proton the game code can never build: zig, the compiler, locks its cache files with NtLockFile, which
+// Wine doesn't implement the way zig calls it (WineHQ bug 59935, open; "checking cache failed: manifest_create
+// Unexpected" on the first file, wherever the folder is: #165, #201, #40). Moving the cache (gamebuild.c
+// zig_cache_elsewhere) doesn't help. The native Linux build (AppImage / zip / .deb on the releases page) runs there.
+static const char *wine_build_hint(bool pt) {
+    return pt ? "Você está usando a versão de Windows pelo Wine / Proton, e nele o compilador do jogo (zig) não funciona "
+                "(falta uma função no Wine: WineHQ bug 59935). Baixe a versão de Linux do ZA Recomp (AppImage, .zip ou .deb) "
+                "na página de releases: ela roda direto no Linux e no Steam Deck."
+              : "You're running the Windows version through Wine / Proton, where the game's compiler (zig) can't work (a "
+                "function Wine lacks: WineHQ bug 59935). Download the Linux version of ZA Recomp (AppImage, .zip or .deb) "
+                "from the releases page: it runs natively on Linux and the Steam Deck.";
+}
+static bool build_under_wine(int k) {
+#ifdef _WIN32
+    return k == FAIL_BUILD && plat_wine_version();
+#else
+    (void)k;
+    return false;
+#endif
 }
 static void set_failure(int k, const std::string &detail = "") {
     if (k < 1 || k > 8) return;
     g_fail = k, g_fail_detail = detail;
     rt_launcher_log("[launcher] failure shown: %s%s%s\n", fail_head(k, false), detail.empty() ? "" : ": ", detail.c_str());
-    set_job(fail_head(k, false), true, detail.empty() ? fail_hint(k, false) : detail + "\n" + fail_hint(k, false));
+    if (build_under_wine(k)) rt_launcher_log("[launcher] under Wine %s: the native Linux build is the way (WineHQ bug 59935)\n",
+#ifdef _WIN32
+                                             plat_wine_version()
+#else
+                                             ""
+#endif
+                                             );
+    const char *hint = build_under_wine(k) ? wine_build_hint(false) : fail_hint(k, false);
+    set_job(fail_head(k, false), true, detail.empty() ? hint : detail + "\n" + hint);
 }
 
 static bool is_dir(const std::string &p) {
     struct stat st;
     return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+// The game data's RomFS: the image a package setup makes (romfs.bin), or the folder an extracted / .nup
+// setup leaves (romfs/). zaprompts reads either.
+static std::string romfs_source(void) {
+    if (file_exists(g_root + "/romfs.bin")) return g_root + "/romfs.bin";
+    if (is_dir(g_root + "/romfs") && file_exists(g_root + "/romfs/arc/data.trpfs")) return g_root + "/romfs";
+    return "";
 }
 
 // exefs: the folder with main and main.npdm; romfs: the folder with region_common (Link's Awakening's data root) or
@@ -503,7 +556,7 @@ static void find_game(const std::string &dir, int depth, std::string &exefs, std
         if (n[0] == '.') continue;
         std::string ext = n.size() > 4 ? n.substr(n.size() - 4) : "";
         for (auto &ch : ext) ch = (char)tolower((unsigned char)ch);
-        if (ext == ".xci" || ext == ".nsp" || ext == ".nca" || ext == ".nsz" || ext == ".xcz") unusable = true;
+        if (ext == ".xci" || ext == ".nsp" || ext == ".nup" || ext == ".nca" || ext == ".nsz" || ext == ".xcz") unusable = true;
         if (n != "region_common" && n != "arc" && is_dir(dir + "/" + n)) sub.push_back(dir + "/" + n);
     }
     closedir(d);
@@ -517,9 +570,10 @@ static bool build_id_ok(const std::string &main_path) {
 }
 
 // ------------------------------------------------------------------ Z-A: the player's packages -> game files
-// Game packages (.xci / .nsp) in the picked folder or a few levels below it
+// Game packages (.xci / .nsp / .nup) in the picked folder or a few levels below it
 // (compressed: .nsz / .xcz seen - NSZ's compressed packages, not readable here)
-static void find_packages(const std::string &dir, int depth, std::vector<std::string> &out, int &compressed) {
+static void find_packages(const std::string &dir, int depth, std::vector<std::string> &out, int &compressed,
+                          bool &need_keys) {
     if (depth > 3) return;
     DIR *d = opendir(dir.c_str());
     if (!d) return;
@@ -530,12 +584,13 @@ static void find_packages(const std::string &dir, int depth, std::vector<std::st
         std::string ext = n.size() > 4 ? n.substr(n.size() - 4) : "";
         for (auto &ch : ext) ch = (char)tolower((unsigned char)ch);
         if (is_dir(dir + "/" + n)) sub.push_back(dir + "/" + n);
-        else if (ext == ".xci" || ext == ".nsp") out.push_back(dir + "/" + n);
+        else if (ext == ".nup") out.push_back(dir + "/" + n);
+        else if (ext == ".xci" || ext == ".nsp") out.push_back(dir + "/" + n), need_keys = true;
         else if (ext == ".nsz" || ext == ".xcz") compressed++;
     }
     closedir(d);
     std::sort(sub.begin(), sub.end());
-    for (auto &s : sub) find_packages(s, depth + 1, out, compressed);
+    for (auto &s : sub) find_packages(s, depth + 1, out, compressed, need_keys);
 }
 
 // The player's keys files, told apart by what is in them, whatever they are named (prod.keys, prod.keys.txt - Windows'
@@ -642,8 +697,8 @@ static std::string find_title_keys(const std::string &src, const std::string &pr
 static std::atomic<unsigned long long> g_done, g_total;  // (progress: below)
 static bool g_import_mode;                               // Z-A packages: the bar is the import, then the build
 
-// zaimport (tools/zaimport, shipped as zaimport/zaimport.exe) writes <root>/exefs, romfs.bin, aoc/; its progress
-// lines ("progress <done> <total>") go to the bar, its last line is the reason when it fails
+// zaimport (tools/zaimport, shipped as zaimport/zaimport.exe) writes <root>/exefs and romfs.bin or romfs/, plus
+// aoc/; its progress lines ("progress <done> <total>") go to the bar, its last line is the reason when it fails
 static bool import_packages(const std::vector<std::string> &pkgs, const std::string &keys, const std::string &title_keys,
                             std::string &err) {
     char tool[1100];
@@ -655,7 +710,8 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
     std::string log = g_root + "/import.log";
     std::vector<const char *> argv = {tool};
     if (!title_keys.empty()) argv.push_back("--title-keys"), argv.push_back(title_keys.c_str());
-    argv.push_back(keys.c_str());
+    if (keys.empty()) argv.push_back("--no-keys");  // (.nup-only: no prod.keys needed)
+    else argv.push_back(keys.c_str());
     argv.push_back(g_root.c_str());
     for (auto &p : pkgs) argv.push_back(p.c_str());
     argv.push_back(NULL);
@@ -715,7 +771,7 @@ static std::string prompts_stamp(void) {
     mix(g_bind_key, sizeof g_bind_key);
     // An imported/replaced game must regenerate its private resources too, even
     // when bindings did not change. Runtime still verifies the actual source bytes.
-    for (const char *name : {"/romfs.bin", "/exefs/main"}) {
+    for (const char *name : {"/romfs.bin", "/romfs/arc/data.trpfs", "/exefs/main"}) {
         struct stat sb;
         uint64_t identity[2] = {0, 0};
         if (!stat((g_root + name).c_str(), &sb)) identity[0] = sb.st_size, identity[1] = sb.st_mtime;
@@ -765,7 +821,7 @@ static bool prompts_wanted(void) {
     int tries = 0;
     prompts_marked("textures/prompts.tried", &tries);
     return rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool) &&
-           file_exists(g_root + "/romfs.bin") && !prompts_marked("textures/prompts/.made") && tries < 3;
+           !romfs_source().empty() && !prompts_marked("textures/prompts/.made") && tries < 3;
 }
 // wait: until made (the setup), else started and left running (a boot, a rebind)
 static bool make_prompts(bool wait) {
@@ -775,6 +831,8 @@ static bool make_prompts(bool wait) {
         g_prompts_busy = false;
         return false;
     }
+    std::string romfs = romfs_source();
+    if (romfs.empty()) { g_prompts_busy = false; return false; }
     if (g_prompts_proc && plat_proc_wait(g_prompts_proc, false) < 0) plat_proc_kill(g_prompts_proc);  // (made for old bindings)
     g_prompts_proc = 0;
     mkdir("textures", 0755);
@@ -782,7 +840,6 @@ static bool make_prompts(bool wait) {
     int tries = 0;
     prompts_marked("textures/prompts.tried", &tries);
     if (FILE *f = fopen("textures/prompts.tried", "wb")) fprintf(f, "%s %d", stamp.c_str(), tries + 1), fclose(f);
-    std::string romfs = g_root + "/romfs.bin";
     const char *ini = getenv("LARECOMP_SETTINGS");  // (as runtime/settings.c: the bindings the icons name)
     if (!ini || !*ini) ini = "larecomp.ini";
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--settings", ini, "--mods", "mods", "--out", "textures/prompts",
@@ -805,10 +862,10 @@ static void xbox_layout_before_play(void) {
     if (!g_settings.xbox_attack_layout || !xbox_layout_wanted()) return;
     char tool[1100];
     if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool) ||
-        !file_exists(g_root + "/romfs.bin"))
+        romfs_source().empty())
         return;
     mkdir("textures", 0755);
-    std::string stamp = prompts_stamp(), romfs = g_root + "/romfs.bin";
+    std::string stamp = prompts_stamp(), romfs = romfs_source();
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--mods", "mods", "--install", stamp.c_str(),
                           "--xbox-attack-layout-only", NULL};
     PlatProc p = plat_spawn(argv, "textures/xbox-layout.log", false);
@@ -816,6 +873,74 @@ static void xbox_layout_before_play(void) {
     rt_launcher_log("[launcher] Xbox battle layout: %s (zaprompts exit %d; textures/xbox-layout.log)\n",
             r == 0 ? "prepared" : "not prepared", r);
 }
+// F1 > Full-detail models (#190): cache/maxlod made from the player's own game files by zaprompts --maxlod
+// (tools/za/lod_mod.py: ~1100 models in ~2 min, in the background, ~2 MB) when the setting is on and there is none for
+// this game's data (cache/maxlod.src: the data's size and time; runtime/services/fs.c checks the version again before
+// layering it). From the next start. Log: cache/maxlod.log.
+static PlatProc g_maxlod_proc;
+extern "C" int launcher_maxlod_state(void) {  // 0 off / nothing to do, 1 being made, 2 ready
+    if (g_maxlod_proc) {
+        if (plat_proc_wait(g_maxlod_proc, false) < 0) return 1;
+        g_maxlod_proc = 0;
+    }
+    return file_exists("cache/maxlod/.made") ? 2 : 0;
+}
+extern "C" void launcher_maxlod_kick(void) {
+    char tool[1100];
+    if (!g_settings.full_detail || g_root.empty() || g_maxlod_proc) return;
+    std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
+    std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
+    char src[64] = "", had[64] = "";
+    struct stat sb;
+    if (stat(data.c_str(), &sb)) return;
+    snprintf(src, sizeof src, "%lld %lld", (long long)sb.st_size, (long long)sb.st_mtime);
+    if (FILE *f = fopen("cache/maxlod.src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
+    if (!strcmp(src, had) && file_exists("cache/maxlod/.made")) return;
+    if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
+        return;
+    mkdir("cache", 0755);
+    if (FILE *f = fopen("cache/maxlod.src", "wb")) fputs(src, f), fclose(f);
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--maxlod", "cache/maxlod", NULL};
+    g_maxlod_proc = plat_spawn(argv, "cache/maxlod.log", false);
+    rt_launcher_log("[launcher] full-detail models: %s\n", g_maxlod_proc ? "being made (cache/maxlod.log)" : "zaprompts didn't start");
+}
+
+// F1 > Draw distance (#190): cache/drawdist made by zaprompts --drawdist (tools/za/draw_dist.py: the world's LOD /
+// culling tables, ~15 s) when the setting isn't the game's and none was made for this data and distance
+// (cache/drawdist.src). Log: cache/drawdist.log.
+static PlatProc g_drawdist_proc;
+extern "C" int launcher_drawdist_state(void) {  // 0 nothing to do, 1 being made, 2 ready for the setting
+    if (g_drawdist_proc) {
+        if (plat_proc_wait(g_drawdist_proc, false) < 0) return 1;
+        g_drawdist_proc = 0;
+    }
+    unsigned long long made = 0;
+    int pct = 0;
+    if (FILE *f = fopen("cache/drawdist/.made", "rb")) { if (fscanf(f, "%llu %d", &made, &pct) != 2) pct = 0; fclose(f); }
+    return pct && pct == g_settings.draw_dist ? 2 : 0;
+}
+extern "C" void launcher_drawdist_kick(void) {
+    char tool[1100], fac[32];
+    if (g_settings.draw_dist == 100 || g_root.empty() || g_drawdist_proc) return;
+    std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
+    std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
+    char src[96] = "", had[96] = "";
+    struct stat sb;
+    if (stat(data.c_str(), &sb)) return;
+    snprintf(src, sizeof src, "%lld %lld %d", (long long)sb.st_size, (long long)sb.st_mtime, g_settings.draw_dist);
+    if (FILE *f = fopen("cache/drawdist.src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
+    if (!strcmp(src, had) && launcher_drawdist_state() == 2) return;
+    if (!rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
+        return;
+    mkdir("cache", 0755);
+    if (FILE *f = fopen("cache/drawdist.src", "wb")) fputs(src, f), fclose(f);
+    snprintf(fac, sizeof fac, "%g", g_settings.draw_dist / 100.0);
+    const char *argv[] = {tool, "--romfs", romfs.c_str(), "--drawdist", "cache/drawdist", "--factor", fac, NULL};
+    g_drawdist_proc = plat_spawn(argv, "cache/drawdist.log", false);
+    rt_launcher_log("[launcher] draw distance %d%%: %s\n", g_settings.draw_dist,
+                    g_drawdist_proc ? "being made (cache/drawdist.log)" : "zaprompts didn't start");
+}
+
 // runtime/main.c, a set-up copy booting straight into the game: the icons made in the background if they never were,
 // or were made for other bindings
 extern "C" void launcher_prompts_kick(const char *root) {
@@ -823,6 +948,8 @@ extern "C" void launcher_prompts_kick(const char *root) {
     settings_load();  // (the bindings: the boot loads them later, runtime/main.c boot)
     xbox_layout_before_play();
     if (prompts_wanted()) make_prompts(false);
+    launcher_maxlod_kick();
+    launcher_drawdist_kick();
 }
 // runtime/ui/controls_ui.mm, a binding changed (larecomp.ini saved): the icons made again for it, from the next start
 extern "C" void launcher_prompts_refresh(void) {
@@ -884,20 +1011,24 @@ static void *extract_thread(void *) {
     find_game(src, 0, exefs, romfs, unusable);
     if ((exefs.empty() || romfs.empty()) && unusable) {  // packages: Pokémon Legends Z-A's (zaimport reads them)
         int compressed = 0;
-        find_packages(src, 0, pkgs, compressed);
+        bool need_keys = false;
+        find_packages(src, 0, pkgs, compressed, need_keys);
         if (pkgs.empty() && compressed) {
             set_failure(FAIL_UNUSABLE, TR("Your dump is compressed (.nsz / .xcz): decompress it to .nsp / .xci with "
                                           "NSZ first.", "O seu dump está comprimido (.nsz / .xcz): descomprima para .nsp / "
                                           ".xci com o NSZ antes."));
             goto done;
         }
-        std::string bad, keys = find_keys(src, &bad), err;
-        if (keys.empty()) {
-            set_failure(FAIL_KEYS, bad.empty() ? "" : "\"" + bad + TR("\" isn't a prod.keys: it has no header_key line.",
-                                                                       "\" não é um prod.keys: não tem a linha header_key."));
-            goto done;
+        std::string bad, keys, title_keys, err;
+        if (need_keys) {
+            keys = find_keys(src, &bad);
+            if (keys.empty()) {
+                set_failure(FAIL_KEYS, bad.empty() ? "" : "\"" + bad + TR("\" isn't a prod.keys: it has no header_key line.",
+                                                                           "\" não é um prod.keys: não tem a linha header_key."));
+                goto done;
+            }
+            title_keys = find_title_keys(src, keys);
         }
-        std::string title_keys = find_title_keys(src, keys);
         rt_launcher_log("[launcher] %zu package(s), keys %s, title keys %s\n", pkgs.size(), keys.c_str(),
                 title_keys.empty() ? "-" : title_keys.c_str());
         rt_remove_game_files(g_root.c_str());
@@ -2203,17 +2334,31 @@ static void party_icons_kick(void) {  // made when missing (3 tries: cache/party
     asked = true;
     // (the game's data: the RomFS image the setup makes, else a romfs/ folder extracted by the player)
     std::string romfs = file_exists(g_root + "/romfs.bin") ? g_root + "/romfs.bin" : g_root + "/romfs";
-    if (file_exists(PARTY_ICONS "/.made") || !file_exists(romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "")) ||
+    std::string data = romfs + (is_dir(romfs) ? "/arc/data.trpfs" : "");
+    // The game data the icons were drawn from (cache/party_icons.src: its size and time): icons made once from 1.0.0
+    // were kept after the update to 2.0.x, which has none for the DLC's Pokémon (Tinkaton, Ceruledge... a ball on
+    // their cards, #213). Other data: made again (the tries count again too).
+    char src[64] = "";
+    struct stat sb;
+    if (!stat(data.c_str(), &sb)) snprintf(src, sizeof src, "%lld %lld", (long long)sb.st_size, (long long)sb.st_mtime);
+    char had[64] = "";
+    if (FILE *f = fopen(PARTY_ICONS ".src", "rb")) { size_t n = fread(had, 1, sizeof had - 1, f); had[n] = 0; fclose(f); }
+    bool same_data = !strcmp(src, had);
+    if (!same_data) remove(PARTY_ICONS ".tried");
+    if ((same_data && file_exists(PARTY_ICONS "/.made")) || !file_exists(data) ||
         !rt_resource("zaprompts/zaprompts" PLAT_EXE_SUFFIX, "build/helper/zaprompts/zaprompts" PLAT_EXE_SUFFIX, tool, sizeof tool))
         return;
     int tries = 0;
     if (FILE *f = fopen(PARTY_ICONS ".tried", "rb")) tries = fscanf(f, "%d", &tries) == 1 ? tries : 0, fclose(f);
     if (tries >= 3) return;
     mkdir("cache", 0755);
+    remove(PARTY_ICONS "/.made");  // (made again: the card shows the new one once it is there)
+    if (FILE *f = fopen(PARTY_ICONS ".src", "wb")) fputs(src, f), fclose(f);
     if (FILE *f = fopen(PARTY_ICONS ".tried", "wb")) fprintf(f, "%d", tries + 1), fclose(f);
     const char *argv[] = {tool, "--romfs", romfs.c_str(), "--party-icons", PARTY_ICONS, NULL};
     g_party_icons_proc = plat_spawn(argv, PARTY_ICONS ".log", false);
-    rt_launcher_log("[launcher] team icons: %s\n", g_party_icons_proc ? "being made (" PARTY_ICONS ".log)" : "zaprompts didn't start");
+    rt_launcher_log("[launcher] team icons: %s%s\n", g_party_icons_proc ? "being made (" PARTY_ICONS ".log)" : "zaprompts didn't start",
+                    !same_data ? " (for this game data: none yet, or it changed since they were made)" : "");
 }
 
 #ifdef __APPLE__
@@ -2323,6 +2468,8 @@ extern "C" void launcher_run(const char *root) {
     g_start_screen = 1;
     settings_load();
     lang_update();
+    launcher_maxlod_kick();  // (F1 > Full-detail models on and none made for this game yet: made now, in the background)
+    launcher_drawdist_kick();  // (F1 > Draw distance: the same)
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
     if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
         update_checked = true;
@@ -2735,14 +2882,14 @@ extern "C" void launcher_run(const char *root) {
                         : TR("Choose the folder with your own copy of Pokémon Legends Z-A, either way:\n"
                              "· the game extracted (exefs and romfs folders, as an emulator or your Switch extracts them): "
                              "no keys needed;\n"
-                             "· or your dump: the base game (.xci or .nsp), optionally the update and the DLC (.nsp), and "
-                             "the prod.keys from your Switch.\n"
+                             "· or your dump: the base game (.xci / .nsp with your prod.keys, or .nup without keys), optionally the update "
+                             "and the DLC (.nsp).\n"
                              "You can also drop the folder on this window. The game isn't included with ZA Recomp.",
                              "Escolha a pasta com a sua própria cópia de Pokémon Legends Z-A, de um destes jeitos:\n"
                              "· o jogo extraído (pastas exefs e romfs, como um emulador ou o seu Switch extraem): sem "
                              "precisar de keys;\n"
-                             "· ou o seu dump: o jogo base (.xci ou .nsp), se quiser a atualização e a DLC (.nsp), e o "
-                             "prod.keys do seu Switch.\n"
+                             "· ou o seu dump: o jogo base (.xci / .nsp com o seu prod.keys, ou .nup sem keys), se quiser a atualização e a "
+                             "DLC (.nsp).\n"
                              "Também dá para arrastar a pasta para esta janela. O jogo não vem com o ZA Recomp.");
                     std::string first_setup_text;
                     if (getenv("LUMIOSE_FIRST_SETUP")) {
@@ -2779,7 +2926,8 @@ extern "C" void launcher_run(const char *root) {
                     }
                     ty += 74;
                     if (failed && g_fail) {  // what went wrong, and what to do
-                        std::string hint = g_fail_detail.empty() ? fail_hint(g_fail, g_pt) : g_fail_detail + "\n" + fail_hint(g_fail, g_pt);
+                        const char *fh = build_under_wine(g_fail) ? wine_build_hint(g_pt) : fail_hint(g_fail, g_pt);
+                        std::string hint = g_fail_detail.empty() ? fh : g_fail_detail + "\n" + fh;
                         float hh = text_size(F_BODY, 14, hint.c_str(), w - 48).y;
                         panel(dl, x, ty, w, hh + 64, IM_COL32(40, 12, 10, 220), IM_COL32(255, 138, 112, 90));
                         text(dl, F_LABEL, 16, x + 24, ty + 14, C_RED, fail_head(g_fail, g_pt));
@@ -3217,7 +3365,9 @@ extern "C" void launcher_run(const char *root) {
                 }
                 if (!upd.empty()) {
                     std::string link = std::string(TR("New version ", "Nova versão ")) + tag_label(upd, false) +
-                                       TR(" available — see what's new", " disponível — ver novidades");
+                                       (g_update_rebuild == 1 ? TR(" available (the game is compiled again) — see what's new",
+                                                                   " disponível (o jogo é compilado de novo) — ver novidades")
+                                                              : TR(" available — see what's new", " disponível — ver novidades"));
                     ImVec2 ls = text_size(F_LABEL, 14, link.c_str());
                     float lx2 = W_ - 28 - ls.x, ly2 = H_ - 24 - ls.y / 2;
                     ImGui::SetCursorScreenPos(P(lx2, ly2));
@@ -3256,13 +3406,31 @@ extern "C" void launcher_run(const char *root) {
                             else
                                 ImGui::Text("%s", TR("ZA Recomp downloads it from GitHub, replaces its program files and opens again.",
                                                      "O ZA Recomp baixa a versão nova do GitHub, troca os arquivos do programa e abre de novo."));
-                            ImGui::TextDisabled("%s", TR("Saves, mods, settings and the compiled game are kept as they are.",
-                                                         "Saves, mods, configurações e o jogo já compilado ficam como estão."));
+                            if (g_update_rebuild == 1) {  // (the release's notes: another game-code id)
+                                ImGui::Spacing();
+                                ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "%s",
+                                                   TR("This version changes the game code: after updating, the game is compiled again\n"
+                                                      "before you can play (about 10 to 30 minutes, once). Update now, or later?",
+                                                      "Esta versão muda o código do jogo: depois de atualizar, o jogo é compilado de novo\n"
+                                                      "antes de você poder jogar (de 10 a 30 minutos, uma vez). Atualizar agora ou depois?"));
+                                ImGui::TextDisabled("%s", TR("Saves, mods and settings are kept as they are.",
+                                                             "Saves, mods e configurações ficam como estão."));
+                            } else if (g_update_rebuild == 0) {
+                                ImGui::TextDisabled("%s", TR("No new compile of the game: saves, mods, settings and the compiled game are kept as they are.",
+                                                             "Sem compilar o jogo de novo: saves, mods, configurações e o jogo já compilado ficam como estão."));
+                            } else {
+                                ImGui::TextDisabled("%s", TR("Saves, mods and settings are kept as they are. If this version changes the game code,\n"
+                                                             "the game is compiled again when it opens (10 to 30 minutes, once).",
+                                                             "Saves, mods e configurações ficam como estão. Se esta versão mudar o código do jogo,\n"
+                                                             "o jogo é compilado de novo ao abrir (de 10 a 30 minutos, uma vez)."));
+                            }
                             ImGui::Spacing();
-                            if (ImGui::Button(TR("Update", "Atualizar"), ImVec2(220 * g_s, 0))) g_update_go = true, ImGui::CloseCurrentPopup();
+                            if (ImGui::Button(g_update_rebuild == 1 ? TR("Update now", "Atualizar agora") : TR("Update", "Atualizar"),
+                                              ImVec2(220 * g_s, 0)))
+                                g_update_go = true, ImGui::CloseCurrentPopup();
                             ImGui::SameLine();
                             ImGui::SetItemDefaultFocus();
-                            if (ImGui::Button(TR("Cancel", "Cancelar"), ImVec2(220 * g_s, 0)) ||
+                            if (ImGui::Button(g_update_rebuild == 1 ? TR("Later", "Depois") : TR("Cancel", "Cancelar"), ImVec2(220 * g_s, 0)) ||
                                 ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
                                 ImGui::CloseCurrentPopup();
                             ImGui::EndPopup();

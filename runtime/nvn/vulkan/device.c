@@ -139,7 +139,10 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
     static atomic_uint n;
     bool stop = sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT && getenv("LARECOMP_VK_VALIDATION_STOP");
     if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT &&
-        (stop || atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 500)) LOG("[vk] %s\n", d->pMessage);
+        (stop || atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 500)) {
+        LOG("[vk] %s\n", d->pMessage);
+        launcher_log_file("[vk] %s\n", d->pMessage);  // (the game's stderr is not kept; validation errors must survive)
+    }
     if (stop) {
         LOG("[vk] stopping at the first validation error\n");
         fflush(stderr);
@@ -740,7 +743,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[32];
+    const char *ext[40];
     uint32_t n_ext = 0;
     // Vulkan 1.2: the 1.3 features the driver has as extensions. LARECOMP_VK_COMPAT=1 takes none of them (the compat.c
     // ways), =<names> only leaves out those: rendering, sync, eds, eds2 (e.g. =sync)
@@ -750,9 +753,36 @@ static void create_device(void) {
     bool v13 = g_vkc.api >= VK_API_VERSION_1_3;
     bool x_dr = !v13 && !VK_OFF("rendering") && has_ext(ep, ne, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
     bool x_s2 = !v13 && !VK_OFF("sync") && has_ext(ep, ne, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
-    bool x_ds = !v13 && !(VK_OFF("eds") && !strstr(cm, "eds2")) && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+    // Extended dynamic state 1 is core in Vulkan 1.3, but RADV 27 initializes its PS epilog cache only when the
+    // extension's feature bit is enabled (radv_device.c: ps_epilogs). Without it, the first draw of a fragment shader
+    // with an epilog crashes in radv_shader_part_cache_get (Mesa 27.0-devel, GFX1201). Enabling the promoted extension
+    // on a 1.3 device is legal and sets that bit; the commands stay the core ones below. Only RADV needs it, so other
+    // 1.3 drivers keep their previous feature chain.
+    bool radv = strstr(g_vk.props.deviceName, "RADV") != NULL;
+    bool x_ds = !(VK_OFF("eds") && !strstr(cm, "eds2")) && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME) &&
+                (!v13 || radv);
     bool x_ds2 = !v13 && !VK_OFF("eds2") && has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
 #undef VK_OFF
+    bool fsr4_req = vk_fsr4_wanted();
+#ifdef VK_KHR_cooperative_matrix
+    bool fsr4_cm_ext = has_ext(ep, ne, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+#else
+    bool fsr4_cm_ext = false;
+#endif
+#ifdef VK_EXT_shader_float8
+    bool fsr4_f8_ext = has_ext(ep, ne, VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
+#else
+    bool fsr4_f8_ext = false;
+#endif
+#ifdef VK_KHR_compute_shader_derivatives
+    bool fsr4_cd_ext = has_ext(ep, ne, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+#else
+    bool fsr4_cd_ext = false;
+#endif
+    bool fsr4_cd_quads = false, fsr4_cd_linear = false;
+    if (fsr4_req && fsr4_cm_ext) ext[n_ext++] = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME;
+    if (fsr4_req && fsr4_f8_ext) ext[n_ext++] = VK_EXT_SHADER_FLOAT8_EXTENSION_NAME;
+    if (fsr4_req && fsr4_cd_ext) ext[n_ext++] = VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME;
     if (x_dr) ext[n_ext++] = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
     if (x_s2) ext[n_ext++] = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
     if (x_ds) ext[n_ext++] = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
@@ -830,7 +860,7 @@ static void create_device(void) {
     // Whether the window really shows the frames presented (present_watch). LARECOMP_NO_PRESENT_WATCH=1: not checked
     bool x_pw = !ENV("LARECOMP_NO_PRESENT_WATCH") && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
                 has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
-    vk_dlaa_device_exts(ep, ne, ext, &n_ext, 28);  // (DLAA: what NGX needs; room left for the ones added below)
+    vk_dlaa_device_exts(ep, ne, ext, &n_ext, 36);  // (DLAA: what NGX needs; room left for the ones added below)
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -838,9 +868,11 @@ static void create_device(void) {
     VkPhysicalDevicePresentWaitFeaturesKHR have_pw = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
                                                       .pNext = x_rb2 ? &have_rb2 : NULL};
     VkPhysicalDevicePresentIdFeaturesKHR have_pid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, .pNext = &have_pw};
+    VkPhysicalDeviceVulkan11Features have11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                                .pNext = x_pw ? (void *)&have_pid : x_rb2 ? (void *)&have_rb2 : NULL};
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
+    have11.pNext = &have12;
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have11};
 #if defined(__linux__) && defined(VK_EXT_map_memory_placed)
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT have_placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT};
     if (placed_ext) have_placed.pNext = have12.pNext, have12.pNext = &have_placed;
@@ -859,6 +891,30 @@ static void create_device(void) {
     if (eds3_ext) have_eds3.pNext = have.pNext, have.pNext = &have_eds3;
 #endif
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    g_vk.fsr4 = false;
+    if (fsr4_req && fsr4_cm_ext && fsr4_f8_ext) {
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_EXT_shader_float8)
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR have_cm = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+        VkPhysicalDeviceShaderFloat8FeaturesEXT have_f8 = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT, .pNext = &have_cm};
+        VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR have_cd = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR, .pNext = &have_f8};
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                     .pNext = fsr4_cd_ext ? (void *)&have_cd : (void *)&have_f8};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        fsr4_cd_quads = have_cd.computeDerivativeGroupQuads;
+        fsr4_cd_linear = have_cd.computeDerivativeGroupLinear;
+        g_vk.fsr4 = have_cm.cooperativeMatrix && have_f8.shaderFloat8 && have_f8.shaderFloat8CooperativeMatrix &&
+                    have.features.shaderInt16 && have.features.shaderStorageImageExtendedFormats &&
+                    have.features.shaderStorageImageWriteWithoutFormat && have11.variablePointers &&
+                    have11.variablePointersStorageBuffer && have11.storageBuffer16BitAccess && have12.shaderFloat16 &&
+                    have12.shaderInt8 && have12.storageBuffer8BitAccess && have12.uniformAndStorageBuffer8BitAccess &&
+                    have12.vulkanMemoryModel && have12.vulkanMemoryModelDeviceScope;
+        if (!g_vk.fsr4)
+            LOG("[vk] FSR 4.1.2: this GPU or driver lacks cooperative matrix / shader float8 / the 8- and 16-bit features\n");
+#endif
+    }
     x_rb2 = x_rb2 && have.features.robustBufferAccess && have_rb2.robustBufferAccess2 && have_rb2.robustImageAccess2;
     if (x_rb2) ext[n_ext++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
     x_pw = x_pw && have_pid.presentId && have_pw.presentWait;
@@ -996,10 +1052,17 @@ static void create_device(void) {
     VkPhysicalDeviceDynamicRenderingFeaturesKHR fdr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR,
                                                        .dynamicRendering = VK_TRUE, .pNext = tail};
     if (x_dr) tail = &fdr;
+    // (the 1.3 feature struct was filled before the extension feature structs above were added to tail; the extended
+    // dynamic state bit has to reach it when the promoted extension is enabled on a 1.3 device - see x_ds)
+    if (v13 && x_ds) fds.pNext = f13.pNext, f13.pNext = &fds;
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
-                                            .scalarBlockLayout = VK_TRUE, .bufferDeviceAddress = g_vk.bda, .shaderOutputLayer = have12.shaderOutputLayer,
+                                            .scalarBlockLayout = VK_TRUE, .bufferDeviceAddress = g_vk.bda,
+                                            .shaderFloat16 = g_vk.fsr4 && have12.shaderFloat16,
+                                            .vulkanMemoryModel = g_vk.fsr4 && have12.vulkanMemoryModel,
+                                            .vulkanMemoryModelDeviceScope = g_vk.fsr4 && have12.vulkanMemoryModelDeviceScope,
+                                            .shaderOutputLayer = have12.shaderOutputLayer,
                                             .samplerFilterMinmax = have12.samplerFilterMinmax,
                                             .shaderOutputViewportIndex = have12.shaderOutputViewportIndex, .pNext = v13 ? (void *)&f13 : tail};
     if (!v13) {  // (an older driver may lack some: say which, and ask only for what it has)
@@ -1009,7 +1072,10 @@ static void create_device(void) {
 #undef VK_WANT12
     }
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
-                                            .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
+                                            .storageBuffer16BitAccess = VK_TRUE,
+                                            .variablePointers = g_vk.fsr4 && have11.variablePointers,
+                                            .variablePointersStorageBuffer = g_vk.fsr4 && have11.variablePointersStorageBuffer,
+                                            .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
@@ -1031,6 +1097,21 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE};
     if (g_vk.gpl_probe) en_gpl.pNext = f.pNext, f.pNext = &en_gpl;
 #endif
+#if defined(VK_KHR_cooperative_matrix) && defined(VK_EXT_shader_float8)
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR en_cm = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+        .cooperativeMatrix = VK_TRUE, .cooperativeMatrixRobustBufferAccess = VK_FALSE};
+    VkPhysicalDeviceShaderFloat8FeaturesEXT en_f8 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT,
+        .shaderFloat8 = VK_TRUE, .shaderFloat8CooperativeMatrix = VK_TRUE, .pNext = &en_cm};
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR en_cd = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR,
+        .computeDerivativeGroupQuads = fsr4_cd_quads, .computeDerivativeGroupLinear = fsr4_cd_linear};
+    if (g_vk.fsr4) {
+        en_cm.pNext = f.pNext, f.pNext = &en_f8;
+        if (fsr4_cd_ext) en_cd.pNext = f.pNext, f.pNext = &en_cd;
+    }
+#endif
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->drawIndirectFirstInstance = h->drawIndirectFirstInstance;  // (the game's GPU-culled draws start past instance 0: GPU-AV)
@@ -1051,6 +1132,10 @@ static void create_device(void) {
     g_vk.ssbo_chunks = h->fragmentStoresAndAtomics && h->vertexPipelineStoresAndAtomics && h->robustBufferAccess;
     b->shaderClipDistance = h->shaderClipDistance;
     b->geometryShader = h->geometryShader;  // (fragment shaders reading gl_Layer: the Geometry capability)
+    b->shaderInt16 = g_vk.fsr4 && h->shaderInt16;
+    b->shaderStorageImageExtendedFormats = g_vk.fsr4 && h->shaderStorageImageExtendedFormats;
+    b->shaderStorageImageWriteWithoutFormat = g_vk.fsr4 && h->shaderStorageImageWriteWithoutFormat;
+    if (g_vk.fsr4) LOG("[vk] FSR 4.1.2: cooperative matrix and shader float8 enabled on this device\n");
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
@@ -1066,10 +1151,23 @@ static void create_device(void) {
     // vkCreateDevice -4 on Dozen two minutes after a device loss on AMD's Vulkan driver - D3D12 refused the new device,
     // likely Windows still recovering the GPU or blocking this program after the reset). The settings file already says
     // Vulkan (the Graphics API choice is only kept once the device and swapchain are up), so this can't loop.
-    if (created != VK_SUCCESS && g_vk.dozen && !ENV("LARECOMP_DX12_NO_FALLBACK")) {
-        LOG("[vk] DirectX 12 (Dozen) could not create its device (%d: %s): starting again on Vulkan\n", created,
-            created == VK_ERROR_DEVICE_LOST ? "Direct3D 12 reports the GPU removed or reset" : "Direct3D 12 refused");
-        launcher_log_file("[vk] DirectX 12 could not create its device (%d): started again on Vulkan\n", created);
+    // DirectX 12 on an NVIDIA GPU (the setting, not LARECOMP_DX12=1): the same. It is there for AMD cards whose Vulkan
+    // driver crashes the game; on NVIDIA, Vulkan is the right path, and Dozen there crashed in its own layer at the
+    // first frames (#172, RTX 4050 Laptop, v0.1.17) and, on v0.1.18, froze on the start screen (a fence waited 2 s and
+    // more, nothing drawn) - no crash, so e380c58's switch never came.
+    bool dzn_nvidia = created == VK_SUCCESS && g_vk.dozen && !ENV("LARECOMP_DX12") &&
+                      (g_vk.props.vendorID == 0x10de || strstr(g_vk.props.deviceName, "NVIDIA"));
+    if ((created != VK_SUCCESS || dzn_nvidia) && g_vk.dozen && !ENV("LARECOMP_DX12_NO_FALLBACK")) {
+        if (dzn_nvidia) {
+            LOG("[vk] DirectX 12 (Dozen) on an NVIDIA GPU (%s): starting again on Vulkan, this GPU's own driver "
+                "(LARECOMP_DX12=1 keeps DirectX 12)\n", g_vk.props.deviceName);
+            launcher_log_file("[vk] DirectX 12 on an NVIDIA GPU: started again on Vulkan\n");
+            vkDestroyDevice(g_vk.dev, NULL), g_vk.dev = VK_NULL_HANDLE;
+        } else {
+            LOG("[vk] DirectX 12 (Dozen) could not create its device (%d: %s): starting again on Vulkan\n", created,
+                created == VK_ERROR_DEVICE_LOST ? "Direct3D 12 reports the GPU removed or reset" : "Direct3D 12 refused");
+            launcher_log_file("[vk] DirectX 12 could not create its device (%d): started again on Vulkan\n", created);
+        }
         g_settings.dx12 = false;
         settings_save();
         _putenv_s("VK_DRIVER_FILES", "");
@@ -2347,6 +2445,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     }
 }
 
+static _Atomic long debug_frames_at, debug_frames_n;  // (present_hooks: the frames to dump; debug_frame_after_present)
+void debug_frame_after_present(uint64_t frame);
 // The game thread's side of a present: the frame counters and the per-frame hooks (input, pacing, test hooks).
 static void present_hooks(void) {
     total_frames++;
@@ -2381,7 +2481,16 @@ static void present_hooks(void) {
     // LARECOMP_DEBUG_FRAMES=<n> (with LARECOMP_DEBUG_FRAME / F9): dump n consecutive frames (build/pass_<frame>_NNN.png)
     static long debug_n = -1;
     if (debug_n < 0) { const char *e = ENV("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
-    g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
+    atomic_store(&debug_frames_at, debug_at), atomic_store(&debug_frames_n, debug_n);
+    if (!rq_on()) debug_frame_after_present(total_frames - 1);
+}
+
+// The frames dumped (F9 / LARECOMP_DEBUG_FRAME) are decided where their lists are translated: with the render thread
+// that is after it ran the present before them (rqueue.c) - set here, on the game thread, the flag was over by the
+// time the render thread got to the frame, and F9 caught only its first few passes.
+void debug_frame_after_present(uint64_t frame) {
+    long at = atomic_load(&debug_frames_at), n = atomic_load(&debug_frames_n);
+    g_debug_frame = at && frame + 1 >= (uint64_t)at && frame + 1 < (uint64_t)at + (uint64_t)n;
 }
 
 void backend_present(NvnTexture *t) {
@@ -2513,6 +2622,11 @@ void ui_window_init(void) {
     window = SDL_CreateWindow("ZA Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
+    if (ENV("LARECOMP_WINDOW_POS")) {  // (two games side by side: local play tests)
+        int x = 0, y = 0;
+        sscanf(ENV("LARECOMP_WINDOW_POS"), "%d,%d", &x, &y);
+        SDL_SetWindowPosition(window, x, y);
+    }
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !ENV("LARECOMP_WINDOW") && !ENV("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
