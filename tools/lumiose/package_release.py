@@ -1,5 +1,6 @@
 """Build the Windows release folder from an explicit, game-free allowlist."""
 import argparse
+import hashlib
 from pathlib import Path
 import shutil
 import sys
@@ -58,6 +59,14 @@ def main():
         copy_file(ROOT / 'tools' / n, out / 'tools' / n)
     copy_file(ROOT / 'tools/rando/patch_variants.json', out / 'tools/rando/patch_variants.json')
     shutil.copytree(ROOT / 'tools/lumiose', out / 'tools/lumiose', ignore=shutil.ignore_patterns('__pycache__', '*.subsdk9', 'prepackaged.subsdk9'))
+    # Exact mod/reference shipped in v0.1.27; never accept arbitrary NSOs.
+    approved_mods = {'lumiose/subsdk9': 'e304bf4fa710be688f5a50dc9b6210b8dbdb4671e7b9ea5313c63ed3e17f69e2',
+                     'tools/lumiose/prepackaged.subsdk9': 'e7aaea520e8074763c047e9bab7a0de2ae79ed4953fcc7a91c0f36469411e5f9'}
+    for name, digest in approved_mods.items():
+        src = ROOT / name
+        if hashlib.sha256(src.read_bytes()).hexdigest() != digest:
+            raise RuntimeError(f'Unexpected bundled mod bytes: {name}')
+        copy_file(src, out / name)
     for n in ('lumiose/model-renderer', 'THIRD-PARTY-NOTICES'):
         src = a.support / n
         if not src.is_dir(): raise RuntimeError(f'Required renderer/notices missing: {src}')
@@ -75,9 +84,9 @@ def main():
         if f.suffix.lower() in forbidden or f.name.lower() in {'main', 'main.npdm', 'sdk', 'rtld', 'romfs.bin', 'prod.keys', 'lasgame.dll'}:
             raise RuntimeError(f'Game file unexpectedly present: {f}')
         with f.open('rb') as stream: magic = stream.read(4)
-        if magic == b'NSO0':
+        if magic == b'NSO0' and f.relative_to(out).as_posix() not in approved_mods:
             raise RuntimeError(f'Unexpected NSO module: {f}')
-    print(f'Packaged {sum(1 for f in out.rglob("*") if f.is_file())} files; no game or mod NSOs are included.')
+    print(f'Packaged {sum(1 for f in out.rglob("*") if f.is_file())} files; only exact v0.1.27 mod/reference NSOs are included; no game modules.')
 
 
 if __name__ == '__main__':
