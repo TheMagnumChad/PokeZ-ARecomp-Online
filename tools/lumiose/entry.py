@@ -9,7 +9,7 @@ from datetime import datetime
 
 ROOT = Path(__file__).resolve().parents[2]
 GAME_CODE_REVISION = 'camera-distance-v1'
-LAUNCHER_VERSION = 'v0.1.29'
+LAUNCHER_VERSION = 'v0.1.30'
 sys.path.insert(0, str(ROOT / 'tools' / 'lumiose'))
 from auto_launch import launch
 from platform_paths import EXECUTABLE, GAME_LIBRARY, lock_file
@@ -36,6 +36,8 @@ def desktop_notice(title, message, error=False):
 
 def main():
     os.chdir(ROOT)
+    from local_mod_import import ensure_local_mod
+    ensure_local_mod(ROOT)
     # A runtime restarted by the launcher updater must return through this entry point once. Child runtimes inherit
     # this marker so they do not route back here again while the update notification still exists.
     os.environ['LUMIOSE_ENTRY_ACTIVE'] = LAUNCHER_VERSION
@@ -69,13 +71,13 @@ def main():
                 raise RuntimeError('Game setup was not completed. Start Lumiose Online again when you are ready.')
         log_event('Game setup check completed')
     if first_setup:
-        log_event('Preparing bundled Lumiose for first launch')
+        log_event('Preparing locally supplied Lumiose for first launch')
         cmd = [sys.executable, str(ROOT / 'tools/lumiose/setup.py'), '--install', str(ROOT),
                '--zig', str(ROOT / 'zig'), '--server', '135.148.167.226:27777']
         desktop_notice('Lumiose Online', 'Preparing the online mod. This may take several minutes.')
         if subprocess.run(cmd, cwd=ROOT).returncode:
             raise RuntimeError('Lumiose preparation did not finish; see the message above.')
-        log_event('Bundled Lumiose preparation completed')
+        log_event('Local Lumiose preparation completed')
     if not config.is_file():
         raise RuntimeError('Lumiose configuration is missing. Your save files have not been changed.')
     # Rewrite paths when the player moves the installed folder.
@@ -101,6 +103,7 @@ if __name__ == '__main__':
         log = (log_dir / 'lumiose-launch.log').open('a', encoding='utf-8', buffering=1)
         sys.stdout = sys.stderr = log
     try:
+        (ROOT / 'lumiose').mkdir(parents=True, exist_ok=True)
         lock_path = ROOT / 'lumiose' / 'update.lock'
         with lock_path.open('a+b') as lock:
             try: lock_file(lock)

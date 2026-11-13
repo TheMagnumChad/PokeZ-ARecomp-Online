@@ -1,23 +1,13 @@
-# Lumiose Online for ZA Recomp (Windows)
+# Lumiose Online v0.1.30 - Windows full launcher repair
 
-1. Extract the entire archive into a writable folder.
-2. Open **Lumiose Online.exe**. Keep the preparation window open.
-3. In the launcher, select your own Pokémon Legends: Z-A game files, including
-   the 2.0.2 update and DLC. Follow the setup prompts. The game is not included.
-4. After setup, Lumiose prepares automatically and the launcher reopens. The
-   first preparation can take several minutes.
+This full package restores the runtime DLLs and setup tools omitted from v0.1.29. It does not change graphics dependencies or add new performance features.
 
-When Lumiose reports an update, close the game and open **Lumiose Online.exe**
-again. The update is prepared and checked before it is activated. A future
-version with incompatible changes may require an updated release of this fork.
-After the first preparation, a local cache normally avoids re-translating
-unchanged game code. The cache stays on your computer and is never distributed.
+Existing installations: close the game and use Update now, or extract the entire archive over your existing installation. Keep your game files, lumiose folder, saves, settings and compatible caches. They are not included or deleted by this update.
 
-Graphics → **Camera distance** adjusts the follow camera from 50% to 200%; 100%
-is the game's normal distance. This setting supports game version 2.0.2. After
-updating to a launcher with a new game-code version, follow the rebuild prompt;
-Lumiose will then be prepared again for that version.
+Fresh installations: extract the entire ZA Recomp folder to a writable location and open Lumiose Online.exe. Keep the preparation console open. First setup asks for TWO locally supplied mod files: the supported legacy 1.3.9 compatibility-reference subsdk9 and your current online-mod subsdk9. Obtain these through your mod provider. Arbitrary NSO files are not supported. The launcher checks compatibility before copying or compiling them. Neither file is bundled here.
 
-Your saves, settings, game files and generated game code remain on your computer.
-The launcher checks this fork's GitHub releases for launcher updates. For help
-and source code, visit https://github.com/TheMagnumChad/PokeZ-ARecomp-Online.
+Then select your own Pokemon Legends: Z-A game files, including update 2.0.2 and DLC, and follow setup. Game code, models, textures and fonts are processed locally from those files. The first compilation can take several minutes. No game data, game assets, generated game libraries, saves or mod binaries are distributed in this archive.
+
+Requires Windows x64, a Vulkan-capable graphics driver and the Microsoft Visual C++ x64 runtime where required by the graphics components. Third-party notices and model-renderer corresponding source are included. Linux users should retain the existing Linux experimental UI package; this repair targets Windows. No AMD or Steam Deck hardware validation is claimed.
+
+The model viewer remains experimental. This repair does not claim exhaustive model correctness.

@@ -33,7 +33,8 @@ def main():
     vanilla_id = game / (GAME_LIBRARY + '.id')
     reference = ROOT / 'lumiose' / 'subsdk9'
     bundled = ROOT / 'tools/lumiose/prepackaged.subsdk9'
-    candidate = bundled if bundled.is_file() else reference  # older installations
+    imported = ROOT / 'lumiose/imported-mod.subsdk9'
+    candidate = imported if imported.is_file() else (bundled if bundled.is_file() else reference)
     required = [exe, vanilla, vanilla_id, zig / ZIG, reference, candidate]
     if WINDOWS: required.append(ROOT / 'build' / 'lasrecomp.dll.a')
     for p in required:

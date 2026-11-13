@@ -57,10 +57,11 @@ def main():
     for n in ('gamelib_entry.c', 'lumiose_test_entry.c'):
         copy_file(ROOT / 'tools' / n, out / 'tools' / n)
     copy_file(ROOT / 'tools/rando/patch_variants.json', out / 'tools/rando/patch_variants.json')
-    shutil.copytree(ROOT / 'tools/lumiose', out / 'tools/lumiose', ignore=shutil.ignore_patterns('__pycache__'))
-    if not (out / 'tools/lumiose/prepackaged.subsdk9').is_file():
-        raise RuntimeError('The prepackaged Lumiose mod is missing')
-    copy_file(ROOT / 'lumiose/subsdk9', out / 'lumiose/subsdk9')
+    shutil.copytree(ROOT / 'tools/lumiose', out / 'tools/lumiose', ignore=shutil.ignore_patterns('__pycache__', '*.subsdk9', 'prepackaged.subsdk9'))
+    for n in ('lumiose/model-renderer', 'THIRD-PARTY-NOTICES'):
+        src = a.support / n
+        if not src.is_dir(): raise RuntimeError(f'Required renderer/notices missing: {src}')
+        shutil.copytree(src, out / n)
     for n in ('python.exe', 'python312.dll', 'python3.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'LICENSE.txt'):
         copy_file(a.python / n, out / 'python' / n)
     shutil.copytree(a.python / 'DLLs', out / 'python/DLLs')
@@ -74,9 +75,9 @@ def main():
         if f.suffix.lower() in forbidden or f.name.lower() in {'main', 'main.npdm', 'sdk', 'rtld', 'romfs.bin', 'prod.keys', 'lasgame.dll'}:
             raise RuntimeError(f'Game file unexpectedly present: {f}')
         with f.open('rb') as stream: magic = stream.read(4)
-        if magic == b'NSO0' and f not in (out / 'lumiose/subsdk9', out / 'tools/lumiose/prepackaged.subsdk9'):
+        if magic == b'NSO0':
             raise RuntimeError(f'Unexpected NSO module: {f}')
-    print(f'Packaged {sum(1 for f in out.rglob("*") if f.is_file())} files; only Lumiose mod NSOs are included.')
+    print(f'Packaged {sum(1 for f in out.rglob("*") if f.is_file())} files; no game or mod NSOs are included.')
 
 
 if __name__ == '__main__':
