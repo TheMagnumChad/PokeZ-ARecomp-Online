@@ -569,7 +569,7 @@ class Module:
 # tools/patches.py, for Link's Awakening's main module only (its sites are main addresses): loaded in main() once the
 # game version is known from the NSO's build ID (tools/game_addresses.py). Pokémon Legends Z-A: tools/za_patches.py.
 HOOKS, PATCHES = {}, {}
-from za_patches import ZA_BUILDS, za_patches
+from za_patches import ZA_BUILDS, za_patches, za_sdk_patches
 
 import json as _json
 import os as _os
@@ -616,6 +616,8 @@ def main():
         if args.name == 'main':
             PATCHES.update(za_patches(main_build))
             print(f'{args.name}: Pokémon Legends Z-A (build {main_build}): {len(PATCHES)} game patch(es)')
+        elif args.name == 'sdk':
+            PATCHES.update(za_sdk_patches(main_build, m.nso.build_id))
     elif args.name == 'main':
         import game_addresses
         try:
