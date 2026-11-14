@@ -1,23 +1,39 @@
-# Lumiose Online for ZA Recomp (Windows)
+# Lumiose Online for ZA Recomp — v0.1.32 (Windows)
 
-1. Extract the entire archive into a writable folder.
-2. Open **Lumiose Online.exe**. Keep the preparation window open.
-3. In the launcher, select your own Pokémon Legends: Z-A game files, including
-   the 2.0.2 update and DLC. Follow the setup prompts. The game is not included.
-4. After setup, Lumiose prepares automatically and the launcher reopens. The
-   first preparation can take several minutes.
+## Install or update
 
-When Lumiose reports an update, close the game and open **Lumiose Online.exe**
-again. The update is prepared and checked before it is activated. A future
-version with incompatible changes may require an updated release of this fork.
-After the first preparation, a local cache normally avoids re-translating
-unchanged game code. The cache stays on your computer and is never distributed.
+- New installation: extract the complete **ZA Recomp** folder into a writable
+  location and open **Lumiose Online.exe**. Supply your own Pokemon Legends:
+  Z-A game files, update 2.0.2 and DLC. Normal bundled mod setup is included.
+- Existing installation: close the game and use **Update now**, or copy the
+  complete archive over the existing installation, merging folders. Keep your
+  saves, settings, locally generated game code and installed mod data.
+- Keep the preparation window open. This update refreshes game code and control
+  glyphs once. Saved customized bindings remain; Restore default controls in
+  Settings > Controls adopts the new layout.
 
-Graphics → **Camera distance** adjusts the follow camera from 50% to 200%; 100%
-is the game's normal distance. This setting supports game version 2.0.2. After
-updating to a launcher with a new game-code version, follow the rebuild prompt;
-Lumiose will then be prepared again for that version.
+## Native PC controls
 
-Your saves, settings, game files and generated game code remain on your computer.
-The launcher checks this fork's GitHub releases for launcher updates. For help
-and source code, visit https://github.com/TheMagnumChad/PokeZ-ARecomp-Online.
+WASD movement; mouse camera; E interact; Shift sprint; Space dodge; Ctrl crouch.
+Tab toggles a valid lock-on and releases when its target is lost. Hold RMB to
+aim a Poke Ball, LMB to throw, and release RMB to put the ball away. Wheel cycles
+balls while aiming, or party members otherwise. Middle-click sends/switches or
+recalls the selected Pokemon. Moves use 1/2/3/4; Q is Mega Evolution; R is Plus.
+
+Esc opens the main menu or goes back. I opens Satchel, B Boxes, P Pokedex,
+O Mable's Research, and M the map. Map: wheel zoom, WASD pan, E interact.
+Satchel tabs: A/D. Menu up/down: W/S. Hover and click to select in menus.
+Drag Pokemon between Box/party slots, and eligible items onto party members.
+Shop and clothing clicks remain tied to the displayed item after scrolling or
+changing tabs. Click outside a context menu to close it.
+
+Prompts follow keyboard/mouse, Xbox or generic-controller input and configured
+bindings. Mouse menus remain available with a controller connected. See
+**docs/PC-CONTROLS.md** for the complete guide.
+
+## Support
+
+Please report bugs in the **LumioseOnline Discord**, including the affected
+screen, the action and the log file. This release contains the accepted controls
+changes; the separate graphics work is not included. Game ROMs, extracted game
+assets, generated game libraries, saves, settings and caches are not distributed.

@@ -9,6 +9,8 @@
 #include <unistd.h>
 
 #include "../../paths.h"
+#include "../../input_bind.h"
+#include "../../hle/za_mouse_drag.h"
 #include "../../platform.h"
 #include "../../rt.h"  // (HEAP_MAX: lazy_heap_predicted)
 #include "../../settings.h"
@@ -1894,6 +1896,25 @@ void vk_frame_end(const char *shot_path) {
     rec_CmdEndRendering(cb);
     VkSpan shot = {0};
     if (shot_path) save_window_image(cb, &shot);
+    ZaDragCapture drag_request = {0}; VkSpan drag_shot = {0}; int drag_size = 0;
+    if (input_drag_capture_take(&drag_request) && drag_request.window_w > 0 && drag_request.window_h > 0) {
+        float sx = (float)g_vk.sc_extent.width / drag_request.window_w;
+        float sy = (float)g_vk.sc_extent.height / drag_request.window_h;
+        int cx = (int)(drag_request.center_x * sx), cy = (int)(drag_request.center_y * sy);
+        drag_size = (int)(drag_request.size * fminf(sx, sy));
+        if (drag_size > 256) drag_size = 256;
+        int x = cx - drag_size / 2, y = cy - drag_size / 2;
+        if (drag_size >= 8 && x >= 0 && y >= 0 && x + drag_size <= (int)g_vk.sc_extent.width && y + drag_size <= (int)g_vk.sc_extent.height) {
+            drag_shot = vk_readback((uint64_t)drag_size * drag_size * 4);
+            if (drag_shot.ptr) {
+                image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                VkBufferImageCopy rg = {.bufferOffset = drag_shot.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                        .imageOffset = {x, y, 0}, .imageExtent = {(uint32_t)drag_size, (uint32_t)drag_size, 1}};
+                rec_CmdCopyImageToBuffer(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, drag_shot.buf, 1, &rg);
+                image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            }
+        }
+    }
     if (g_vk.hdr) {  // the SDR image drawn -> the window's HDR image
         extern void vk_hdr_encode(VkCommandBuffer cb, VkImageView sdr, VkImageView base, VkImageView dst);
         VkImage hi = g_vk.hdr_images[cur_frame.image];
@@ -1947,6 +1968,11 @@ void vk_frame_end(const char *shot_path) {
         vk_wait_seq(seq);
         hdr_shot_report(hdr_shot.ptr);
         hdr_shot.ptr = NULL;
+    }
+    if (drag_shot.ptr) {
+        vk_wait_seq(seq);
+        bool bgr = g_vk.sc_format == VK_FORMAT_B8G8R8A8_UNORM || g_vk.sc_format == VK_FORMAT_B8G8R8A8_SRGB;
+        input_drag_capture_submit(drag_request.serial, drag_shot.ptr, drag_size, drag_size, bgr);
     }
     if (shot_path) {
         // (the PNG is encoded on a thread of its own: done here it held the frame ~250 ms - a periodic hitch with
@@ -2483,7 +2509,13 @@ void ui_window_init(void) {
         const char *v = ENV("LARECOMP_NO_USER_INPUT");
         bool scripted = v ? atoi(v) != 0 : (ENV("LARECOMP_INPUT") || ENV("LARECOMP_DOORJUMP_TEST") || ENV("LARECOMP_PLACE") ||
                                             ENV("LARECOMP_HOST_INPUT") || ENV("LARECOMP_BIND_TEST"));
-        if (scripted) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+        if (scripted) {
+            // Ignoring events alone does not stop the OS from focusing a fullscreen window.
+            // Unattended runs must also leave desktop input with the user's application.
+            wflags |= SDL_WINDOW_NOT_FOCUSABLE;
+            SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+            SDL_SetHint(SDL_HINT_MOUSE_AUTO_CAPTURE, "0");
+        }
     }
     // Graphics API: DirectX 12 (the setting, LARECOMP_DX12=0/1 over it): the Vulkan loader is pointed at the shipped
     // Dozen (dx12/dzn_icd.x86_64.json next to the exe: Mesa's Vulkan on Direct3D 12, patched for this game) instead of
@@ -2613,6 +2645,7 @@ int ui_run(void) {
             }
             extern bool input_user_blocked(const SDL_Event *e);
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing (as metal.m)
+            input_note_prompt_event(&e);
             input_cursor_event(&e);
             atomic_store(&ui_stage, "menu_handle_event");
             if (menu_handle_event(&e)) continue;

@@ -66,6 +66,55 @@ SMOOTH_ANIM = {'b1f12fd919eae86a': 0x7001dcdf60}
 # The follow camera asks for its computed offset via f_700009a11c. At this instruction the returned structure has
 # been assembled; the runtime checks both its class and caller before applying the player's distance setting.
 CAMERA_DISTANCE = {'b1f12fd919eae86a': 0x700009a138}
+NATIVE_MOUSE = {'b1f12fd919eae86a': 0x7000371068}
+MENU_NAV = {'b1f12fd919eae86a': 0x7000fe5740}
+BAG_NAV = {'b1f12fd919eae86a': 0x7000fe71c8}
+TAB_NAV = {'b1f12fd919eae86a': 0x7000fd2160}
+LIST_TICK = {'b1f12fd919eae86a': 0x7000fc4c80}
+LIST_SELECT = {'b1f12fd919eae86a': 0x7000fc2630}
+GRID_TICK = {'b1f12fd919eae86a': 0x7000faed70}
+
+def _za_menu_nav(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb9400808, hex(w)  # ldr w8, [x0, #8]
+    return ('{ extern void rt_za_menu_nav(Cpu *); rt_za_menu_nav(c); '
+            'c->x[8] = (uint32_t)LD32(c->x[0] + 8); }')
+
+def _za_bag_nav(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb9401409, hex(w)  # ldr w9, [x0, #0x14]
+    return ('{ extern void rt_za_bag_nav(Cpu *); rt_za_bag_nav(c); '
+            'c->x[9] = (uint32_t)LD32(c->x[0] + 0x14); }')
+
+def _za_tab_nav(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xa9bd7bfd, hex(w)  # stp x29, x30, [sp, #-48]!
+    return ('{ extern void rt_za_tab_nav(Cpu *); rt_za_tab_nav(c); '
+            'c->sp -= 48; ST64(c->sp, c->x[29]); ST64(c->sp + 8, c->x[30]); }')
+
+def _za_list_tick(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd10103ff, hex(w)  # sub sp, sp, #0x40
+    return ('{ extern void rt_za_list_tick(Cpu *); rt_za_list_tick(c); c->sp -= 64; }')
+
+def _za_list_select(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd102c3ff, hex(w)  # sub sp, sp, #0xb0
+    return ('{ extern void rt_za_list_select(Cpu *); rt_za_list_select(c); c->sp -= 176; }')
+
+
+def _za_grid_tick(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xd100c3ff, hex(w)  # sub sp, sp, #0x30
+    return ('{ extern void rt_za_grid_tick(Cpu *); rt_za_grid_tick(c); c->sp -= 48; }')
+
+
+def _za_native_mouse(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x940002a2, hex(w)  # bl 0x7000371af0
+    return ('{ extern void rt_za_native_mouse(Cpu *); extern void f_7000371af0(Cpu *); '
+            'rt_za_native_mouse(c); c->x[30] = 0x700037106cull; f_7000371af0(c); }'
+            f'  /* {a:#x}: direct follow-camera input */')
 
 
 def _za_camera_distance(gen, a):
@@ -85,6 +134,33 @@ def _za_smooth_anim(gen, a):
             f'  /* {a:#x}: ldrb w8, [x8, #0x1f4] (the entity updates every frame: distant ones too) */')
 
 
+# Verified against Z-A 2.0.2: separate glyph-cache entries for each input style.
+_PROMPT_SITES = {
+    0x700261f640: (0xa9ba7bfd, 1, 'uint64_t ea=c->sp-0x60; ST64(ea,c->x[29]); ST64(ea+8,c->x[30]); c->sp=ea;'),
+    0x700261f820: (0xa9ba7bfd, 3, 'uint64_t ea=c->sp-0x60; ST64(ea,c->x[29]); ST64(ea+8,c->x[30]); c->sp=ea;'),
+    0x7002620630: (0xb9588408, 1, 'c->x[8]=(uint32_t)LD32(c->x[0]+0x1884);'),
+    0x700262070c: (0xa9bd7bfd, 1, 'uint64_t ea=c->sp-0x30; ST64(ea,c->x[29]); ST64(ea+8,c->x[30]); c->sp=ea;'),
+    0x7002621020: (0xf9400000, 1, 'c->x[0]=LD64(c->x[0]);'),
+    0x700262106c: (0xa9be7bfd, 1, 'uint64_t ea=c->sp-0x20; ST64(ea,c->x[29]); ST64(ea+8,c->x[30]); c->sp=ea;'),
+}
+def _za_prompt_glyph(gen, a):
+    expected, reg, original = _PROMPT_SITES[a]
+    w = struct.unpack_from('<I', gen.nso.image, a-gen.base)[0]
+    assert w == expected, (hex(a), hex(w))
+    return ('{ extern uint32_t rt_za_prompt_code(uint32_t); '
+            f'c->x[{reg}]=rt_za_prompt_code((uint32_t)c->x[{reg}]); {original} }}')
+
+def _za_prompt_font(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a-gen.base)[0]
+    assert w == 0xaa0103e5, hex(w)
+    return ('{ extern uint64_t rt_za_prompt_font(uint64_t); '
+            'c->x[2]=rt_za_prompt_font(c->x[2]); c->x[5]=c->x[1]; }')
+
+def za_sdk_patches(main_build, sdk_build):
+    if main_build == 'b1f12fd919eae86a' and sdk_build == 'df7a3960c74c3a4803f826c5871532523aa9cf2a':
+        return {0x7008367a38: _za_prompt_font}
+    return {}
+
 def za_patches(build):
     out = {ZA_BUILDS[build]: _za_frame_cfg}
     if build in FRAME_DT:
@@ -95,4 +171,20 @@ def za_patches(build):
         out[SMOOTH_ANIM[build]] = _za_smooth_anim
     if build in CAMERA_DISTANCE:
         out[CAMERA_DISTANCE[build]] = _za_camera_distance
+    if build in NATIVE_MOUSE:
+        out[NATIVE_MOUSE[build]] = _za_native_mouse
+    if build in MENU_NAV:
+        out[MENU_NAV[build]] = _za_menu_nav
+    if build in BAG_NAV:
+        out[BAG_NAV[build]] = _za_bag_nav
+    if build in TAB_NAV:
+        out[TAB_NAV[build]] = _za_tab_nav
+    if build in LIST_TICK:
+        out[LIST_TICK[build]] = _za_list_tick
+    if build in LIST_SELECT:
+        out[LIST_SELECT[build]] = _za_list_select
+    if build in GRID_TICK:
+        out[GRID_TICK[build]] = _za_grid_tick
+    if build == 'b1f12fd919eae86a':
+        out.update({a: _za_prompt_glyph for a in _PROMPT_SITES})
     return out

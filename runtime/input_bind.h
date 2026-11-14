@@ -20,6 +20,9 @@ enum {
     BIND_PAD_COUNT,                                      // controller: the 16 buttons (its sticks stay the sticks)
     BIND_LS_UP = BIND_PAD_COUNT, BIND_LS_DOWN, BIND_LS_LEFT, BIND_LS_RIGHT,
     BIND_RS_UP, BIND_RS_DOWN, BIND_RS_LEFT, BIND_RS_RIGHT,
+    BIND_MOVE_A, BIND_MOVE_B, BIND_MOVE_X, BIND_MOVE_Y, BIND_MOVE_PLUS, // shortcuts while focusing
+    BIND_CANCEL, // independent keyboard cancel / back
+    BIND_RESEARCH, BIND_POKEDEX, BIND_BOXES, // overworld menu shortcuts
     BIND_KEY_COUNT                                       // keyboard: buttons + both sticks
 };
 enum { BIND_DEV_PAD, BIND_DEV_KEY };
@@ -30,6 +33,7 @@ extern int16_t g_bind_pad[BIND_PAD_COUNT];  // PADB value per Switch button
 extern int16_t g_bind_key[BIND_KEY_COUNT];  // SDL_Scancode per input (0 = none)
 // Mouse buttons -> Switch button (BIND_A..BIND_DOWN, -1 none): the other way round from the tables above, so a mouse
 // button adds to the keyboard's key instead of taking its place. Only while the mouse camera holds the cursor.
+enum { BIND_MOUSE_AIM = -2, BIND_MOUSE_PARTY_TOGGLE = -3 }; // hold to aim; release cancels, left click throws
 enum { MOUSEB_LEFT, MOUSEB_RIGHT, MOUSEB_MIDDLE, MOUSEB_X1, MOUSEB_X2, MOUSEB_COUNT };
 extern int16_t g_bind_mouse[MOUSEB_COUNT];
 const char *bind_mouse_name(int mb);           // "Left button"
@@ -43,6 +47,8 @@ const char *bind_pad_label(int host, int fam); // controller button in the pad f
 const char *bind_key_label(int scancode);
 int bind_label_family(void);                   // the connected controller's family (also on the start screen)
 int bind_prompts_auto(void);                   // what "Auto" button icons are now (PROMPTS_*)
+void input_note_prompt_event(const SDL_Event *event); // most recently used device, including at the launcher
+int input_prompt_auto(void);                   // keyboard, Xbox, or original game icons
 int input_family_of_type(int sdl_gamepad_type); // runtime/hle/input.c: 0 Nintendo, 1 Xbox (or labelled like one), 2 PS
 int input_menu_family(uint32_t sdl_joystick_id); // runtime/hle/input.c: our menus' layout for that pad (0: any)
 void bind_reset(int dev);

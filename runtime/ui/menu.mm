@@ -15,6 +15,8 @@
 #include "imgui.h"
 #include "option_rows.h"
 #include "imgui_internal.h"  // (NavCursorVisible)
+#include "../hle/za_battle_keys.h"
+#include "../hle/za_key_glyphs.h"
 #include "osk.h"
 #include "pad_nav.h"
 #include "lumiose_chat_layout.h"
@@ -38,6 +40,7 @@ extern int g_game_is_la;  // runtime/kernel.c: Link's Awakening (its own tabs: r
 extern const char *g_save_dir;
 #include "menu.h"
 void input_reset(void);
+bool input_title_key_event(const SDL_Event *e);
 bool lumiose_legacy_chat_key(const SDL_Event *e);
 void lumiose_legacy_chat_keyboard_result(bool cancelled);
 void save_editor_draw(float scale);  // save_editor.mm
@@ -201,6 +204,7 @@ extern "C" bool menu_cursor_needed(void) { return capturing() || dt_open(); }
 
 bool menu_handle_event(const SDL_Event *e) {
     static bool back_down, start_down;
+    if(!capturing()&&input_title_key_event(e))return true;
     if (g_open.load() && bind_capture_event(e)) return true;  // Controls tab waiting for a new binding: it takes the press
     if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
     if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) g_last_pad = true;
@@ -378,6 +382,7 @@ void menu_apply_window_requests(void *win) {
 static bool g_inited;
 static ImGuiContext *g_ctx;  // ours: the start screen (back to it after a reboot) has its own context
 static ImFont *g_font, *g_font_big, *g_chat_font;
+static ImFont *g_keycap_font;
 static ImFont *g_menu_font, *g_menu_font_big;  // the menu window (Baloo 2); everything else keeps g_font
 static int g_tab, g_tab_request = -2;  // (-2: no request; -1 is the Prelaunch tab)
 static int g_focus_tab = -99;  // put the nav cursor on this tab next frame (-100: the selected one; -99: none)
@@ -473,6 +478,11 @@ static void init(void) {
         g_menu_font_big = io.Fonts->AddFontFromFileTTF(baloo, 72, &cfg);
     }
     if (!g_font) g_font = io.Fonts->AddFontDefault();
+    // The same native Z-A keycap glyphs used inside the game's own text.
+    if(FILE *f=fopen("textures/prompts/keycaps.otf","rb")){
+        fclose(f);static const ImWchar ranges[]={0xec00,0xee0d,0};
+        g_keycap_font=io.Fonts->AddFontFromFileTTF("textures/prompts/keycaps.otf",42,&cfg,ranges);
+    }
     // A smaller fixed-width font fits the Lumiose chat field and its existing text.
     const char *chat_paths[] = {"C:/Windows/Fonts/consola.ttf", bundled};
     for (const char *p : chat_paths) {
@@ -1454,7 +1464,11 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     if (!tabs[cur].on) cur = 0;
     // L/R (or Q/E) switch tabs, skipping greyed-out ones (not while typing: Q / E are letters then, and the on-screen
     // keyboard has the controller)
-    if (g_tab_request_ext >= 0) { g_tab_request = g_tab_request_ext; g_tab_request_ext = -1; }
+    if (g_tab_request_ext >= 0) {
+        g_tab_request = g_tab_request_ext;
+        g_focus_tab = g_tab_request_ext; g_focus_frames = 0;
+        g_tab_request_ext = -1;
+    }
     bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();
     static int focused_tab = -99;  // the tab the controller's cursor is on (from the frame before; -99: none)
     bool switching = false;  // (L / R this frame: the page changes next frame)
@@ -1613,6 +1627,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     const double tw = target_w, th = target_h;
 #endif
     bool open = g_open.load();
+    ZaBattleKey attack_keys[4];
+    bool battle_keys=!open&&input_keyboard_attack_keys(attack_keys);
     bool inv = !open && inventory_overlay_wanted();
     bool trk = !open && tracker_overlay_wanted();
     bool trkd = !open && tracker_dungeon_wanted();
@@ -1623,7 +1639,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool dt = dt_open();
     bool race = race_overlay_wanted();  // (run timer, race seed hash: race_overlay.mm)
     bool flyin = pickup_flyin_wanted() && !open;  // (a silent pickup's card)
-    if (!render_needed(open, kbd, inv, trk, trkd, chaos, race, flyin) && !notice && !dt) {
+    if (!render_needed(open, kbd, inv, trk, trkd, chaos, race, flyin) && !notice && !dt && !battle_keys) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         g_ov_same = 0;  // (shown again: built afresh first)
         return;
@@ -1648,7 +1664,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         fps_note(now, io.DeltaTime);
         char rk[64];
         // (only the FPS counter and the run timer; input only reaches ImGui while the menu or the name entry is up)
-        if (!open && !kbd && !inv && !trk && !trkd && !chaos && !flyin && race_overlay_key(rk, sizeof rk)) {
+        if (!open && !kbd && !inv && !trk && !trkd && !chaos && !flyin && !battle_keys && race_overlay_key(rk, sizeof rk)) {
             pthread_mutex_lock(&q_lock);
             bool events = !q_events.empty();
             pthread_mutex_unlock(&q_lock);
@@ -1704,6 +1720,39 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui_ImplVulkan_NewFrame();
 #endif
     ImGui::NewFrame();
+
+    if(battle_keys&&!kbd){
+        float fit=fminf((float)tw/1920.0f,(float)th/1080.0f);
+        ImVec2 origin(((float)tw-1920*fit)/2,((float)th-1080*fit)/2);
+        const float cap_fit=fit*0.65f;
+        ImDrawList *draw=ImGui::GetForegroundDrawList();ImFont *font=ImGui::GetFont();
+        for(const ZaBattleKey &key:attack_keys){
+            if(!key.key)continue;
+            float cy=origin.y+key.y*fit,cx=origin.x+key.x*fit;
+            const ImFontGlyph *cap=g_keycap_font&&key.key<ZA_KEY_GLYPH_COUNT
+                ?g_keycap_font->FindGlyphNoFallback(ZA_KEY_GLYPH_BASE+key.key):nullptr;
+            if(cap&&cap->Visible){
+                char glyph[5];ImTextCharToUtf8(glyph,ZA_KEY_GLYPH_BASE+key.key);
+                float size=42*cap_fit,glyph_scale=size/g_keycap_font->FontSize;
+                float width=(cap->X1-cap->X0)*glyph_scale;
+                if(width>170*cap_fit){size*=170*cap_fit/width;glyph_scale=size/g_keycap_font->FontSize;}
+                // Font advances include spacing; center the drawn keycap itself.
+                // Round before AddText truncates its origin to whole pixels.
+                ImVec2 at(roundf(cx-(cap->X0+cap->X1)*glyph_scale/2),
+                          roundf(cy-(cap->Y0+cap->Y1)*glyph_scale/2));
+                draw->AddText(g_keycap_font,size,ImVec2(at.x,at.y+cap_fit),IM_COL32(30,49,68,160),glyph);
+                draw->AddText(g_keycap_font,size,at,key.pressed?IM_COL32(250,215,93,255):IM_COL32(250,252,255,255),glyph);
+                continue;
+            }
+            const char *label=za_key_token_label(key.key);float size=26*cap_fit;
+            ImVec2 text=font->CalcTextSizeA(size,FLT_MAX,0,label);
+            if(text.x>154*cap_fit){size*=154*cap_fit/text.x;text=font->CalcTextSizeA(size,FLT_MAX,0,label);}
+            float half=fmaxf(20*cap_fit,text.x/2+9*cap_fit);
+            draw->AddRectFilled(ImVec2(cx-half,cy-18*cap_fit),ImVec2(cx+half,cy+18*cap_fit),key.pressed?IM_COL32(242,181,68,245):IM_COL32(245,248,252,240),4*cap_fit);
+            draw->AddRect(ImVec2(cx-half,cy-18*cap_fit),ImVec2(cx+half,cy+18*cap_fit),IM_COL32(30,41,57,220),4*cap_fit,0,fmaxf(1,cap_fit));
+            draw->AddText(font,size,ImVec2(cx-text.x/2,cy-text.y/2),IM_COL32(20,31,47,255),label);
+        }
+    }
 
     if (g_settings.show_fps) {
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16 * scale, 16 * scale), 0, ImVec2(1, 0));

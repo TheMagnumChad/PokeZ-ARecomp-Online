@@ -103,7 +103,7 @@ static const char *build_version(const uint8_t id[8]) {
 static bool build_is_za(const uint8_t id[8]) { return build_version(id) && memcmp(id, BUILD_ID, 8); }
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): ZA Recomp's v<major>.<minor>.<patch> (Hexveil404/PokeZ-ARecomp releases).
-#define LARECOMP_VERSION "v0.1.31"
+#define LARECOMP_VERSION "v0.1.32"
 extern "C" void rt_launcher_log(const char *fmt, ...);  // runtime/launcher_log.c: logs/launcher.log and stderr
 extern "C" const char *rt_version(void) { return LARECOMP_VERSION; }  // (runtime/main.c: the log's first line)
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
@@ -121,7 +121,6 @@ static void lang_update(void) { g_pt = settings_ui_portuguese(); }  // (runtime/
 // Windows 10+ ship) and offers the best one if it outranks this build: any v<x.y.z> above every beta, betas by
 // number; other tags are ignored. Offline / no curl / anything unexpected: nothing is shown.
 #define RELEASES_URL "https://api.github.com/repos/TheMagnumChad/PokeZ-ARecomp-Online/releases?per_page=100"
-#define RELEASE_PAGE "https://github.com/TheMagnumChad/PokeZ-ARecomp-Online/releases/tag/"
 
 static long long tag_rank(const std::string &t) {
     int n, a, b, c;
@@ -458,7 +457,8 @@ static const char *fail_hint(int k, bool pt) {
         "ZA Recomp runs versions 1.0.0, 2.0.0 and 2.0.2 of the game (base game, or base game + the 2.0.0 or 2.0.2 "
         "update).",
         "Some files are missing. Choose the folder again; if it happens again, dump the game again.",
-        "Make sure there's about 4 GB free and try again. If it keeps happening, report it on GitHub with logs/launcher.log.",
+        "Make sure there's about 4 GB free and try again. If it keeps happening, report it in the LumioseOnline Discord "
+        "with logs/launcher.log.",
         "Put the prod.keys (and title.keys) dumped from your own Switch in the folder with the game files. Any file "
         "name works (prod.keys.txt, keys.txt...): it is recognized by what is inside it.",
         "The full reason is in logs/launcher.log, in the data folder."};
@@ -470,7 +470,8 @@ static const char *fail_hint(int k, bool pt) {
         "Veja se há uns 12 GB livres e tente de novo.",
         "O ZA Recomp roda as versões 1.0.0, 2.0.0 e 2.0.2 do jogo (jogo base, ou jogo base + atualização 2.0.0 ou 2.0.2).",
         "Faltam arquivos. Escolha a pasta de novo; se acontecer outra vez, faça o dump do jogo de novo.",
-        "Veja se há uns 4 GB livres e tente de novo. Se continuar, avise no GitHub com o arquivo logs/launcher.log.",
+        "Veja se há uns 4 GB livres e tente de novo. Se continuar, relate o problema no Discord do LumioseOnline "
+        "com o arquivo logs/launcher.log.",
         "Coloque o prod.keys (e o title.keys) do seu próprio Switch na pasta dos arquivos do jogo. Qualquer nome serve "
         "(prod.keys.txt, keys.txt...): ele é reconhecido pelo conteúdo.",
         "O motivo completo está em logs/launcher.log, na pasta de dados."};
@@ -703,7 +704,7 @@ static bool import_packages(const std::vector<std::string> &pkgs, const std::str
 // Controls tab (both in the background: from the next start). zaprompts --install draws them into textures/prompts.new
 // and swaps that in whole itself (a game never sees half a set). Up to 3 tries per stamp (textures/prompts.tried):
 // failing leaves the game's own icons. Log: textures/prompts.log.
-#define PROMPTS_VERSION "4-xbox1"
+#define PROMPTS_VERSION "17-menu-mouse-glyphs"
 static std::atomic<bool> g_prompts_busy{false};
 static PlatProc g_prompts_proc;  // (the one left running: a newer rebind ends it and starts over)
 static std::string prompts_stamp(void) {
@@ -713,6 +714,8 @@ static std::string prompts_stamp(void) {
     };
     mix(g_bind_pad, sizeof g_bind_pad);
     mix(g_bind_key, sizeof g_bind_key);
+    mix(g_bind_mouse, sizeof g_bind_mouse);
+    mix(&g_settings.mouse_camera, sizeof g_settings.mouse_camera);
     // An imported/replaced game must regenerate its private resources too, even
     // when bindings did not change. Runtime still verifies the actual source bytes.
     for (const char *name : {"/romfs.bin", "/exefs/main"}) {
@@ -2495,6 +2498,7 @@ extern "C" void launcher_run(const char *root) {
 #endif
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            input_note_prompt_event(&e);
             if (g_tab == TAB_SETTINGS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
             if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) {
                 // a file or folder dropped on the window: a mod on the Mods page, a save on the Saves page, the game's
@@ -3113,13 +3117,7 @@ extern "C" void launcher_run(const char *root) {
                                        "próprio dump e as suas chaves. Pokémon e Nintendo Switch são marcas dos seus donos; "
                                        "este projeto não tem ligação com eles.");
                 y += text(dl, F_BODY, 16, x, y, C_SOFT, about, w).y + 26;
-                if (button("##gh", TR("Project page (GitHub)", "Página do projeto (GitHub)"), x, y, 0, 48, BTN_SECONDARY))
-                    SDL_OpenURL("https://github.com/Hexveil404/PokeZ-ARecomp");
-                float bx2 = x + ImGui::GetItemRectSize().x / g_s + 12;
-                if (button("##issues", TR("Report a problem", "Relatar um problema"), bx2, y, 0, 48, BTN_SECONDARY))
-                    SDL_OpenURL("https://github.com/Hexveil404/PokeZ-ARecomp/issues");
-                bx2 += ImGui::GetItemRectSize().x / g_s + 12;
-                if (button("##logs", TR("Open the logs folder", "Abrir a pasta de logs"), bx2, y, 0, 48, BTN_SECONDARY, true, IC_FOLDER))
+                if (button("##logs", TR("Open the logs folder", "Abrir a pasta de logs"), x, y, 0, 48, BTN_SECONDARY, true, IC_FOLDER))
                     reveal_folder("logs");
                 bar = {C_TEAL, TR("Thank you for playing!", "Obrigado por jogar!")};
                 if (back_key) g_tab = TAB_PLAY, g_focus_play = true;
@@ -3184,7 +3182,7 @@ extern "C" void launcher_run(const char *root) {
                     } else if (ust == UPD_UNPACK) msg = TR("Unpacking the update…", "Descompactando a atualização…");
                     else if (ust == UPD_INSTALL) msg = TR("Installing the update…", "Instalando a atualização…");
                     else msg = std::string(TR("Update failed (", "A atualização falhou (")) + upd_err +
-                               TR(") — download it from the releases page", ") — baixe pela página de versões");
+                               TR(") — report this in the LumioseOnline Discord", ") — relate o problema no Discord do LumioseOnline");
                     ImVec2 ms = text_size(F_LABEL, 14, msg.c_str());
                     float mx = W_ - 28 - ms.x, my = H_ - 24 - ms.y / 2;
                     if (ust != UPD_FAILED) {
@@ -3196,11 +3194,6 @@ extern "C" void launcher_run(const char *root) {
                             float lo = a < bx0 ? bx0 : a, hi = a + seg > bx0 + bw ? bx0 + bw : a + seg;
                             if (hi > lo) dl->AddRectFilled(P(lo, by0), P(hi, by0 + 6), C_TEAL, 3 * g_s);
                         }
-                    }
-                    if (ust == UPD_FAILED) {
-                        ImGui::SetCursorScreenPos(P(mx, my));
-                        if (ui_invisible_button("##updfail", S(ms.x, ms.y), ImGuiButtonFlags_EnableNav)) SDL_OpenURL((RELEASE_PAGE + upd).c_str());
-                        if (item_hot()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                     }
                     text(dl, F_LABEL, 14, mx, my, ust == UPD_FAILED ? C_GOLD : C_SOFT, msg.c_str());
                     upd.clear();  // (no link meanwhile)
@@ -3216,19 +3209,11 @@ extern "C" void launcher_run(const char *root) {
                     text(dl, F_LABEL, 14, mx, my, C_TEAL, m.c_str());
                 }
                 if (!upd.empty()) {
-                    std::string link = std::string(TR("New version ", "Nova versão ")) + tag_label(upd, false) +
-                                       TR(" available — see what's new", " disponível — ver novidades");
-                    ImVec2 ls = text_size(F_LABEL, 14, link.c_str());
+                    std::string available = std::string(TR("New version ", "Nova versão ")) + tag_label(upd, false) +
+                                            TR(" available", " disponível");
+                    ImVec2 ls = text_size(F_LABEL, 14, available.c_str());
                     float lx2 = W_ - 28 - ls.x, ly2 = H_ - 24 - ls.y / 2;
-                    ImGui::SetCursorScreenPos(P(lx2, ly2));
-                    bool click = ui_invisible_button("##update", S(ls.x, ls.y), ImGuiButtonFlags_EnableNav);
-                    bool hover = item_hot();
-                    text(dl, F_LABEL, 14, lx2, ly2, hover ? C_GOLD_HI : C_GOLD, link.c_str());
-                    if (hover) {
-                        dl->AddLine(P(lx2, ly2 + ls.y), P(lx2 + ls.x, ly2 + ls.y), C_GOLD_HI, 1.2f * g_s);
-                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                    }
-                    if (click) SDL_OpenURL((RELEASE_PAGE + upd).c_str());
+                    text(dl, F_LABEL, 14, lx2, ly2, C_GOLD, available.c_str());
 #if defined(_WIN32) || defined(__linux__)
                     if (!upd_url.empty() && !busy) {  // "Update now" before it (not while the game code builds)
                         const char *bl = TR("Update now", "Atualizar agora");
@@ -3250,12 +3235,12 @@ extern "C" void launcher_run(const char *root) {
                                                                                  tag_label(upd, false) + "?").c_str());
                             ImGui::PopFont();
                             if (upd_size > 0)
-                                ImGui::Text(TR("ZA Recomp downloads it (%.0f MB) from GitHub, replaces its program files and opens again.",
-                                               "O ZA Recomp baixa a versão nova (%.0f MB) do GitHub, troca os arquivos do programa e abre de novo."),
+                                ImGui::Text(TR("Lumiose Online downloads the update (%.0f MB), replaces its program files and opens again.",
+                                               "O Lumiose Online baixa a versão nova (%.0f MB), troca os arquivos do programa e abre de novo."),
                                             upd_size / 1e6);
                             else
-                                ImGui::Text("%s", TR("ZA Recomp downloads it from GitHub, replaces its program files and opens again.",
-                                                     "O ZA Recomp baixa a versão nova do GitHub, troca os arquivos do programa e abre de novo."));
+                                ImGui::Text("%s", TR("Lumiose Online downloads the update, replaces its program files and opens again.",
+                                                     "O Lumiose Online baixa a versão nova, troca os arquivos do programa e abre de novo."));
                             ImGui::TextDisabled("%s", TR("Saves, mods, settings and the compiled game are kept as they are.",
                                                          "Saves, mods, configurações e o jogo já compilado ficam como estão."));
                             ImGui::Spacing();

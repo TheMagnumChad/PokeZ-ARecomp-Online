@@ -25,6 +25,7 @@
 import argparse, ctypes, mmap, os, re, struct, sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from key_glyphs import short_label, palette_label, KEY_BASE, GLYPH_COUNT
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--romfs', action='append', help='game files: a folder or a RomFS image (default extracted/romfs, else '
@@ -44,7 +45,11 @@ ap.add_argument('--party-icons', metavar='DIR', help="the Pokémon box icons int
 ap.add_argument('--xbox-attack-layout', action='store_true', help='prepare the optional battle layout during setup')
 ap.add_argument('--xbox-attack-layout-only', action='store_true', help='prepare only the battle layout (release smoke test)')
 ap.add_argument('--xbox-attack-layout-version', action='store_true', help='check the frozen helper includes battle layout support')
+ap.add_argument('--prompt-schema', action='store_true', help='check the helper includes current prompt generation')
 args = ap.parse_args()
+if args.prompt_schema:
+    print('ZAPromptSchema 17')
+    sys.exit(0)
 if args.xbox_attack_layout_version:
     from xbox_attack_layout import FORMAT_VERSION
     print('XboxAttackLayout schema', FORMAT_VERSION)
@@ -198,6 +203,26 @@ def hash_full(p):  # runtime/nvn/vulkan/textures.c hash_full: the name a texture
     return r ^ (r >> 31)
 
 
+def fast_hash_full(p):  # runtime/nvn/tex_hash.h: default texture identifier
+    n = len(p)
+    h = [0x9E3779B97F4A7C15 ^ n, 0xC2B2AE3D27D4EB4F, 0x165667B19E3779F9, 0x27D4EB2F165667C5,
+         0x85EBCA77C2B2AE63, 0xFF51AFD7ED558CCD, 0xC4CEB9FE1A85EC53, 0x94D049BB133111EB]
+    i = 0
+    while i + 64 <= n:
+        for k, v in enumerate(struct.unpack_from('<8Q', p, i)):
+            x = ((h[k] ^ v) * 0x100000001B3) & M64
+            h[k] = x ^ (x >> 29)
+        i += 64
+    r = 0
+    for value in h:
+        r = ((r ^ value) * 0x9E3779B97F4A7C15) & M64
+        r ^= r >> 32
+    while i < n:
+        r = ((r ^ p[i]) * 0x100000001B3) & M64
+        i += 1
+    return r ^ (r >> 31)
+
+
 def deswizzle(src, wb, hb, bpb, bh_log2):  # Tegra block linear (64-byte x 8-row GOBs) -> rows of blocks
     gob_h, row = 8 << bh_log2, wb * bpb
     gobs_x = (row + 63) // 64
@@ -299,10 +324,11 @@ if args.party_icons:
 
 
 # ------------------------------------------------------------------ labels
-DEFAULTS = {'a': 'K', 'b': 'J', 'x': 'L', 'y': 'I', 'lstick': 'F', 'rstick': 'Keypad 0', 'l': 'Q', 'r': 'E',
-            'zl': '1', 'zr': '3', 'plus': 'Return', 'minus': 'Backspace', 'left': 'Left', 'up': 'Up', 'right': 'Right',
+DEFAULTS = {'a': 'E', 'b': 'Left Shift', 'x': 'I', 'y': 'Space', 'lstick': 'Left Ctrl', 'rstick': 'Q', 'l': 'T', 'r': 'G',
+            'zl': 'Tab', 'zr': 'none', 'plus': 'M', 'minus': 'Backspace', 'left': 'Left', 'up': 'Up', 'right': 'Right',
             'down': 'Down', 'ls_up': 'W', 'ls_down': 'S', 'ls_left': 'A', 'ls_right': 'D', 'rs_up': 'Keypad 8',
-            'rs_down': 'Keypad 5', 'rs_left': 'Keypad 4', 'rs_right': 'Keypad 6'}  # runtime/hle/bindings.c
+            'rs_down': 'Keypad 5', 'rs_left': 'Keypad 4', 'rs_right': 'Keypad 6',
+            'move_a': '1', 'move_b': '2', 'move_x': '3', 'move_y': '4', 'move_plus': 'R', 'cancel': 'Escape'}  # runtime/hle/bindings.c
 SHORT = {'Return': 'Enter', 'Backspace': 'Bksp', 'Escape': 'Esc', 'Left Shift': 'Shift', 'Right Shift': 'Shift',
          'Left Ctrl': 'Ctrl', 'Right Ctrl': 'Ctrl', 'Left Alt': 'Alt', 'Right Alt': 'Alt', 'CapsLock': 'Caps',
          'Delete': 'Del', 'Insert': 'Ins', 'PageUp': 'PgUp', 'PageDown': 'PgDn', 'Keypad Enter': 'Enter'}
@@ -313,24 +339,37 @@ PAD_DEFAULTS = {'a': 'east', 'b': 'south', 'x': 'north', 'y': 'west', 'lstick': 
                 'l': 'lshoulder', 'r': 'rshoulder', 'zl': 'ltrigger', 'zr': 'rtrigger', 'plus': 'start', 'minus': 'back',
                 'left': 'dpad_left', 'up': 'dpad_up', 'right': 'dpad_right', 'down': 'dpad_down'}
 binds, pad_binds = dict(DEFAULTS), dict(PAD_DEFAULTS)
+mouse_camera = 'captured'
+mouse_binds = {'left': 'zr', 'right': 'aim', 'middle': 'party_toggle', 'x1': 'none', 'x2': 'none'}
+MOUSE_LABEL = {'left': 'LMB', 'right': 'RMB', 'middle': 'MMB', 'x1': 'Mouse4', 'x2': 'Mouse5'}
 if args.settings:
-    for line in open(args.settings, encoding='utf-8', errors='replace'):
+    lines = open(args.settings, encoding='utf-8', errors='replace').readlines()
+    custom=any(line.strip().startswith('bind_key_') and not line.strip().startswith('bind_key_schema') for line in lines)
+    schema=next((int(line.partition('=')[2].strip()) for line in lines if line.strip().startswith('bind_key_schema')),1)
+    if custom and schema<2:
+        binds.update(a='Space', b='J', x='L', y='I', lstick='F', rstick='Keypad 0', l='Q', r='E', zl='1', zr='3', plus='Return', move_a='none', move_b='none', move_x='none', move_y='none', move_plus='none')
+    elif custom and schema==2:
+        binds.update(zr='3',move_a='Z',move_b='X',move_x='C',move_y='V')
+    for line in lines:
         k, _, v = line.partition('=')
         k, v = k.strip(), v.strip()
         if k.startswith('bind_key_') and v and k[9:] in binds: binds[k[9:]] = v
         if k.startswith('bind_pad_') and v and k[9:] in pad_binds: pad_binds[k[9:]] = v
+        if k.startswith('bind_mouse_') and k[11:] in mouse_binds: mouse_binds[k[11:]] = v
+        if k == 'mouse_camera' and v in ('off', 'hold', 'captured'): mouse_camera = v
 
 
 def key(slot):
     v = binds[slot]
+    if v.lower() == 'none': return 'Unbound'
     if v in ARROWS: return ('arrow', ARROWS[v])
-    if v.startswith('Keypad ') and len(v) == 8: return v[7]
-    return SHORT.get(v, v)
+    return short_label(v)
 
 
-def stick_keys(prefix):  # WASD-like: the four keys' names in up, left, down, right order, when they're one letter each
+def stick_keys(prefix):  # the four bindings in up, left, down, right order
     ks = [key(prefix + d) for d in ('up', 'left', 'down', 'right')]
-    return ''.join(ks) if all(isinstance(k, str) and len(k) == 1 for k in ks) else ks[0]
+    if all(isinstance(k, str) and len(k) == 1 for k in ks): return ''.join(ks)
+    return '/'.join(k[1].capitalize() if isinstance(k, tuple) and k[0] == 'arrow' else str(k) for k in ks)
 
 
 # icon name -> button; '|' = two buttons side by side
@@ -369,12 +408,32 @@ PAD_LABEL = {
 DPAD = {'dpad_up': ('arrow', 'up'), 'dpad_down': ('arrow', 'down'), 'dpad_left': ('arrow', 'left'), 'dpad_right': ('arrow', 'right')}
 
 
-def label(style, button):
-    """the new label: a string, ('arrow', dir), a shape (('menu',), ('circle',)...), or None = leave the game's"""
+def label(style, button, context='field'):
+    """Label the active control for the current keyboard context."""
     if style == 'keyboard':
         if button == 'ls': return stick_keys('ls_')
-        if button == 'rs': return stick_keys('rs_')
-        return key(button)
+        if button == 'rs': return 'Mouse' if mouse_camera == 'captured' else 'Hold RMB' if mouse_camera == 'hold' else stick_keys('rs_')
+        if context=='title' and button=='a':return 'Any key'
+        if context=='box' and button in ('l','r'):return 'WheelUp' if button=='l' else 'WheelDown'
+        if context=='field' and mouse_camera=='captured':
+            if button in ('left','right'):return 'WheelUp' if button=='left' else 'WheelDown'
+            if button in ('up','down'):
+                for mouse,assigned in mouse_binds.items():
+                    if assigned=='party_toggle':return MOUSE_LABEL[mouse]
+        slot=button
+        if context in ('menu','aim','bag','box') and button=='b':slot='cancel'
+        elif context=='field' and button=='x':slot='cancel'
+        elif context=='bag' and button in ('l','r'):slot='ls_left' if button=='l' else 'ls_right'
+        elif context=='battle' and button in ('a','b','x','y','plus'):
+            if key('move_'+button)=='Unbound' and mouse_camera=='captured':
+                for mouse,assigned in mouse_binds.items():
+                    if assigned==button:return MOUSE_LABEL[mouse]
+            slot='move_'+button
+        action='aim' if slot=='zr' and context!='aim' else slot
+        if mouse_camera=='captured':
+            for mouse,assigned in mouse_binds.items():
+                if assigned==action:return MOUSE_LABEL[mouse]
+        return key(slot)
     if button not in pad_binds: return None  # (the sticks' own icons)
     host = pad_binds[button]
     if host == PAD_DEFAULTS[button] and (button in ('lstick', 'rstick', 'up', 'down', 'left', 'right') or style == 'nintendo'):
@@ -479,7 +538,7 @@ def keycap(w, h):  # a key: rounded box filling the cell (S x scale)
 
 def relabel(img, name, buttons, style):
     """img: HxWx2 (R, G) at the game's size -> RGBA PNG image at S x, or None when nothing changes"""
-    labels = [label(style, b) for b in buttons]
+    labels = [label(style, b, keyboard_context) for b in buttons]
     keep_shape = any(k in name for k in KEEP_SHAPE)
     if all(l is None for l in labels) and (style != 'keyboard' or keep_shape): return None
     H, W = img.shape[:2]
@@ -715,8 +774,25 @@ def label_contours(new, cx, cy, cap_h, max_w):
     return out
 
 
-def relabel_font(t, style, skip=()):
+def alias_keyboard_glyphs(t):
+    # These directional glyph variants receive the same keyboard labels as their counterparts. Reusing the outlines
+    # saves space in the game archive while keeping every codepoint mapped to the player's binding.
+    aliases = {0xE33C: 0xE335, 0xE33D: 0xE335, 0xE33E: 0xE336, 0xE33F: 0xE336,
+               0xE325: 0xE32E, 0xE326: 0xE32F, 0xE327: 0xE330, 0xE328: 0xE331}
+    applied = set()
+    for table in t['cmap'].tables:
+        if not table.isUnicode(): continue
+        for cp, original in aliases.items():
+            if cp in table.cmap and original in table.cmap:
+                table.cmap[cp] = table.cmap[original]
+                applied.add(cp)
+    best = t.getBestCmap()
+    return {cp for cp in applied if best.get(cp) == best.get(aliases[cp]) and best.get(cp) is not None}
+
+
+def relabel_font(t, style, skip=(), compact=False):
     from fontTools.pens.t2CharStringPen import T2CharStringPen
+    if style == 'keyboard': skip = set(skip) | alias_keyboard_glyphs(t)
     cff = t['CFF '].cff
     top = cff.topDictIndex[0]
     priv = top.Private
@@ -725,7 +801,13 @@ def relabel_font(t, style, skip=()):
     for cp, button in FONT_GLYPHS.items():
         g = cmap.get(cp)
         if not g or cp in skip: continue
-        new = label(style, button)
+        new = label(style, button, keyboard_context)
+        if compact and style == 'keyboard' and button in ('a', 'b', 'x', 'y', 'plus', 'up', 'down', 'left', 'right'):
+            new = key(button)  # compact boot fallback; live fonts keep both action and shortcut labels
+        if compact and style == 'keyboard' and button == 'zr' and mouse_camera == 'captured' and mouse_binds.get('left') == 'zr':
+            new = 'LMB'
+        if compact and isinstance(new, str):
+            new = {'Shift': 'Sh', 'Space': 'Spc', 'Ctrl': 'Ctl', 'Bksp': 'Bk', 'Mouse': 'Mse'}.get(new, new)
         if new is None and style != 'keyboard': continue
         cs = contours(gs[g].draw)
         if not cs: continue
@@ -778,6 +860,106 @@ def font_bytes(t):
     b = io.BytesIO()
     t.save(b)
     return b.getvalue()
+
+
+def append_keyboard_palette(target,order):
+    """Every keyboard scancode and mouse control is present before remapping."""
+    from fontTools.pens.t2CharStringPen import T2CharStringPen
+    top=target['CFF '].cff.topDictIndex[0];chars=top.CharStrings
+    cmap=target.getBestCmap();reference=cmap[0xE31D]
+    original=contours(target.getGlyphSet()[reference].draw)
+    outer=max(original,key=lambda c:abs(area(c)))
+    x0,y0,x1,y1=bounds([outer]);h=y1-y0;sign=area(outer)>0
+    for token in range(GLYPH_COUNT):
+        cp=KEY_BASE+token
+        if cp in cmap:raise ValueError('Keyboard keybank collides with the native font')
+        label=palette_label(token)
+        labs=label_contours(label,0,0,h*(.46 if isinstance(label,str) and len(label)>2 else .52),h*2.0)
+        lx0,ly0,lx1,ly1=bounds(labs);width=max(h,lx1-lx0+h*.42)
+        body=rrect(x0,y0,x0+width,y1,h*.22)
+        if (area(body)>0)!=sign:body=contours(lambda p,b=body:replay(b,p,True))[0]
+        labs=label_contours(label,x0+width/2,(y0+y1)/2,h*(.46 if isinstance(label,str) and len(label)>2 else .52),width*.78)
+        if (area(max(labs,key=lambda c:abs(area(c))))>0)==sign:
+            labs=[contours(lambda p,c=c:replay(c,p,True))[0] for c in labs]
+        advance=round(width+max(0,x0)*2)
+        pen=T2CharStringPen(None if advance==top.Private.defaultWidthX else advance-top.Private.nominalWidthX,None)
+        replay(body,pen)
+        for c in labs:replay(c,pen)
+        name='kbkey_%03x'%token;charstring=pen.getCharString(private=top.Private,globalSubrs=target['CFF '].cff.GlobalSubrs)
+        if chars.charStringsAreIndexed:
+            chars.charStrings[name]=len(chars.charStringsIndex);chars.charStringsIndex.append(charstring)
+        else:chars.charStrings[name]=charstring
+        top.charset.append(name);order.append(name);target['hmtx'].metrics[name]=(advance,round(x0))
+        for table in target['cmap'].tables:
+            if table.isUnicode():table.cmap[cp]=name
+
+
+def combined_prompt_font(original, keyboard, xbox, context_fonts=None):
+    """One game font with all three prompt styles in separate private-use slots."""
+    import io
+    from fontTools.ttLib import TTFont
+    from fontTools.pens.t2CharStringPen import T2CharStringPen
+    target = TTFont(io.BytesIO(original))
+    top = target['CFF '].cff.topDictIndex[0]
+    chars = top.CharStrings
+    order = list(target.getGlyphOrder())
+    original_cmap = target.getBestCmap()
+    if any(cp not in original_cmap for cp in FONT_GLYPHS): raise ValueError('Prompt font lacks expected glyphs')
+    variants = [('keyboard', keyboard, 0xE600), ('xbox', xbox, 0xE700)]
+    variants += [(name, data, base) for name, data, base in (context_fonts or [])]
+    shared_glyphs = {}
+    for style, data, base in variants:
+        source = TTFont(io.BytesIO(data))
+        glyphs, cmap = source.getGlyphSet(), source.getBestCmap()
+        added = {}
+        for cp in FONT_GLYPHS:
+            glyph = cmap.get(cp)
+            if not glyph: raise ValueError('Prompt variant lacks expected glyphs')
+            new_cp = base + cp - 0xE31D
+            if new_cp in original_cmap: raise ValueError('Prompt font uses reserved live-switch codepoints')
+            if glyph not in added:
+                name = style + '_' + glyph
+                advance, bearing = source['hmtx'][glyph]
+                width = None if advance == top.Private.defaultWidthX else advance - top.Private.nominalWidthX
+                pen = T2CharStringPen(width, None)
+                glyphs[glyph].draw(pen)
+                charstring = pen.getCharString(private=top.Private, globalSubrs=target['CFF '].cff.GlobalSubrs)
+                signature = (advance, bearing, tuple(charstring.program))
+                if signature in shared_glyphs:
+                    added[glyph] = shared_glyphs[signature]
+                    for table in target['cmap'].tables:
+                        if table.isUnicode(): table.cmap[new_cp] = added[glyph]
+                    continue
+                shared_glyphs[signature] = name
+                if chars.charStringsAreIndexed:
+                    chars.charStrings[name] = len(chars.charStringsIndex)
+                    chars.charStringsIndex.append(charstring)
+                else:
+                    chars.charStrings[name] = charstring
+                top.charset.append(name)
+                order.append(name)
+                target['hmtx'].metrics[name] = (advance, bearing)
+                added[glyph] = name
+            for table in target['cmap'].tables:
+                if table.isUnicode(): table.cmap[new_cp] = added[glyph]
+    append_keyboard_palette(target,order)
+    target.setGlyphOrder(order)
+    target['maxp'].numGlyphs = len(order)
+    out = io.BytesIO()
+    target.save(out)
+    return out.getvalue()
+
+
+def sfnt_bytes(data):
+    """The font's complete padded table data, as supplied to the game's font engine."""
+    if len(data) < 12: raise ValueError('short font')
+    count = struct.unpack_from('>H', data, 4)[0]
+    if not 0 < count <= 128 or len(data) < 12 + count * 16: raise ValueError('bad font table')
+    end = max(struct.unpack_from('>II', data, 12 + i * 16 + 8)[0] +
+              struct.unpack_from('>II', data, 12 + i * 16 + 8)[1] for i in range(count))
+    end = (end + 3) & ~3
+    if end > len(data): raise ValueError('truncated font')
+    return data[:end]
 
 
 def trpfd_pack_size_at(d, pack_hash):
@@ -889,9 +1071,12 @@ def scan_sarc(d):
                         rgb[:, :, 1] = (im[:, :, 1] * 255).astype(np.uint8)
                         Image.fromarray(rgb).save(os.path.join(args.list_dir, name.replace('^', '_') + '.png'))
             if name not in ICONS or fmt not in (0x1e01, 0x1c01): continue  # (BC5; BC3 in some mods' archives)
-            hh = hash_full(data)
-            if hh not in found: found[hh] = (name, decode_bc5(data, w, h, bh, fmt))
-            if fmt == 0x1c01: bc3.add(hh)
+            hashes = {hash_full(data), fast_hash_full(data)}
+            missing = hashes.difference(found)
+            if missing:
+                image = decode_bc5(data, w, h, bh, fmt)
+                for hh in missing: found[hh] = (name, image)
+            if fmt == 0x1c01: bc3.update(hashes)
 
 
 icon_fonts = {}  # game files folder -> [(Entry, magic, decoded TTF) of or_font / or_font_eng]
@@ -912,7 +1097,10 @@ for romfs in args.romfs:
             elif b'UniversNextPro-BoldCond' in ttf.replace(b'\0', b''):
                 import io
                 from fontTools.ttLib import TTFont
-                LABEL_FONT = TTFont(io.BytesIO(ttf))  # (the game's own letters for the font glyphs' labels)
+                LABEL_FONT = TTFont(io.BytesIO(ttf))
+                os.makedirs(args.out,exist_ok=True)
+                FONT=os.path.join(args.out,'native-labels.otf')
+                with open(FONT,'wb') as f:f.write(ttf)  # Native Z-A lettering for textures and keycaps too.
             continue
         scan_sarc(d)
 # the mods' UI archives (a translation's title screen has its own "PRESS (A)")
@@ -921,6 +1109,19 @@ for root, _, names in os.walk(args.mods):
         if nm.endswith('.arc'):
             with open(os.path.join(root, nm), 'rb') as f: scan_sarc(f.read())
 if args.list: sys.exit(0)
+# A native-format title guide also covers mod-supplied, baked controller art.
+# Its runtime selector uses the verified native resource role, not a mod hash.
+if 'keyboard' in args.styles.split(','):
+    width,height=640*S,64*S
+    red=Image.new('L',(width,height),255);green=Image.new('L',(width,height),0)
+    words=text_mask('Press any key to start',36*S,590*S)
+    padded=Image.new('L',(words.width+4*S,words.height+4*S),0);padded.paste(words,(2*S,2*S));words=padded
+    x=(width-words.width)//2;y=(height-words.height)//2
+    outline=words.filter(ImageFilter.MaxFilter(2*S+1))
+    green.paste(outline,(x,y));red.paste(Image.eval(words,lambda v:255-v),(x,y))
+    os.makedirs(args.out,exist_ok=True)
+    Image.merge('RGBA',(red,green,Image.new('L',(width,height),0),Image.new('L',(width,height),255))).save(os.path.join(args.out,'title_any_key.png'))
+
 print(len(found), 'icon textures,', sum(len(v) for v in icon_fonts.values()), 'icon fonts')
 print('labels:', {b: key(b) for b in ('a', 'b', 'x', 'y', 'l', 'r', 'zl', 'zr', 'plus', 'minus')})
 
@@ -938,6 +1139,8 @@ def record(path, off, orig, data):
 
 # glyphs left as they are when the relabelled fonts don't fit their pack's room, in this order
 OPTIONAL = [(0xE33C, 0xE33D, 0xE33E, 0xE33F), (0xE338, 0xE339), (0xE325, 0xE326, 0xE327, 0xE328)]
+keyboard_context = 'field'
+live_variants = {}
 for style in args.styles.split(','):
     d = os.path.join(args.out, style)
     os.makedirs(d, exist_ok=True)
@@ -966,18 +1169,39 @@ for style in args.styles.split(','):
     for romfs, fonts in icon_fonts.items():
         if not fonts: continue
         e0 = fonts[0][0]
-        for k in range(len(OPTIONAL) + 1):
-            skip = {c for grp in OPTIONAL[:k] for c in grp}
-            files = {}
-            for ent, magic, ttf in fonts:
-                t = TTFont(io.BytesIO(ttf))
-                if relabel_font(t, style, skip): files[ent.index] = bfttf_encode(magic, font_bytes(t))
-            pack = build_pack(e0.m, e0.pack_off, files)
-            if len(pack) <= e0.slot: break
-        else:
+        full_fonts = {}
+        fitted = False
+        for compact in ((False, True) if style == 'keyboard' else (False,)):
+            for k in range(len(OPTIONAL) + 1):
+                skip = {c for grp in OPTIONAL[:k] for c in grp}
+                files = {}
+                for ent, magic, ttf in fonts:
+                    t = TTFont(io.BytesIO(ttf))
+                    if relabel_font(t, style, skip, compact=compact):
+                        payload = font_bytes(t)
+                        if not compact and not k: full_fonts[ent.index] = payload
+                        files[ent.index] = bfttf_encode(magic, payload)
+                pack = build_pack(e0.m, e0.pack_off, files)
+                if len(pack) <= e0.slot:
+                    fitted = True
+                    break
+            if fitted: break
+        if not fitted:
             print(f'{d}: {romfs}: the icon fonts don\'t fit their pack ({len(pack)} > {e0.slot} bytes), left as they are')
+            # The live font is stored separately and has no archive-size limit.
+            if style in ('keyboard', 'xbox'):
+                for ent, magic, original in fonts:
+                    if ent.index in full_fonts:
+                        entry = live_variants.setdefault((romfs, ent.index), {'original': original})
+                        entry[style] = (full_fonts[ent.index], original)
             continue
+        if compact: print(f'{d}: {romfs}: compact keyboard font used for the startup fallback')
         if skip: print(f'{d}: {romfs}: (to fit, {len(skip)} icon font glyphs left as they are)')
+        if style in ('keyboard', 'xbox'):
+            for ent, magic, original in fonts:
+                if ent.index in files and ent.index in full_fonts:
+                    entry = live_variants.setdefault((romfs, ent.index), {'original': original})
+                    entry[style] = (full_fonts[ent.index], bfttf_decode(files[ent.index]))
         pack += bytes(e0.slot - len(pack))
         size_at, _ = trpfd_pack_size_at(trpfds[romfs], e0.pack_hash)
         old_size = trpfds[romfs][size_at:size_at + 8]
@@ -987,7 +1211,59 @@ for style in args.styles.split(','):
         open(patch, 'wb').write(b'ZAROMFS2' + struct.pack('<I', len(recs)) + b''.join(recs))
         print(f'{patch}: icon fonts for {len(recs) // 2} game version(s)')
 
+# Make a separate set for each keyboard context, from the game's own art.
+if 'keyboard' in args.styles.split(','):
+    for context in ('menu', 'battle', 'aim', 'bag', 'title', 'box'):
+        keyboard_context = context
+        directory = os.path.join(args.out, 'keyboard_' + context)
+        os.makedirs(directory, exist_ok=True)
+        for f in os.listdir(directory):
+            if re.fullmatch(r'[0-9a-f]{16}\.png', f): os.remove(os.path.join(directory, f))
+        for hh, (name, img) in sorted(found.items()):
+            out = relabel(img, name, ICONS[name].split('|'), 'keyboard')
+            if out is None: continue
+            if hh in bc3:
+                r, g, _, _ = out.split()
+                out = Image.merge('RGBA', (r, r, r, g))
+            out.save(os.path.join(directory, '%016x.png' % hh))
+        for entry in live_variants.values():
+            try:
+                t = TTFont(io.BytesIO(entry['original']))
+                if relabel_font(t, 'keyboard'): entry['keyboard_' + context] = font_bytes(t)
+            except (KeyError, ValueError, IndexError) as exc:
+                print(f'{directory}: context font unavailable: {exc}')
+    keyboard_context = 'field'
+
+if all(style in args.styles.split(',') for style in ('keyboard', 'xbox')):
+    live = os.path.join(args.out, 'live')
+    os.makedirs(live, exist_ok=True)
+    for old in os.listdir(live):
+        if old == 'manifest.txt' or re.fullmatch(r'[0-9a-f]{16}\.ttf', old): os.remove(os.path.join(live, old))
+    manifest = {}
+    for entry in live_variants.values():
+        if not all(style in entry for style in ('keyboard', 'xbox')): continue
+        try:
+            original = entry['original']
+            contexts = [(name, entry['keyboard_' + name], base) for name, base in (('menu', 0xE800), ('battle', 0xE900), ('aim', 0xEA00), ('bag', 0xEB00))]
+            combined = combined_prompt_font(original, entry['keyboard'][0], entry['xbox'][0], contexts)
+            name = '%016x.ttf' % fnv64(sfnt_bytes(original))
+            with open(os.path.join(live, name), 'wb') as f: f.write(combined)
+            with open(os.path.join(args.out,'keycaps.otf'),'wb') as f:f.write(combined)
+            for font in (original, entry['keyboard'][1], entry['xbox'][1]):
+                manifest[fnv64(sfnt_bytes(font))] = name
+        except (KeyError, ValueError, IndexError) as exc:
+            print(f'{live}: live prompt font unavailable: {exc}')
+    if manifest:
+        with open(os.path.join(live, 'manifest.txt'), 'w', encoding='ascii') as f:
+            f.write('# keyboard-context-v2\n# keyboard-keybank-v1\n')
+            for h, name in sorted(manifest.items()): f.write(f'{h:016x} {name}\n')
+        print(f'{live}: {len(manifest)} live font signatures')
+
 if args.install:  # the finished sets in place of the old ones, in one move
+    if all(os.path.isfile(os.path.join('fonts', name)) for name in
+           ('nintendo_ext_003.bfttf', 'nintendo_udsg-r_std_003.bfttf')):
+        from keyboard_font import make_keyboard_font
+        make_keyboard_font(args.settings)
     with open(os.path.join(args.out, '.made'), 'w') as f: f.write(args.install)
     shutil.rmtree(FINAL, ignore_errors=True)
     os.replace(args.out, FINAL)

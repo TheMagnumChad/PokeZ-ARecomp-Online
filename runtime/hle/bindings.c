@@ -8,27 +8,28 @@
 #include "../hle.h"
 #include "../input_bind.h"
 #include "../settings.h"
+#include "za_key_glyphs.h"
 
 _Static_assert(PADB_LTRIGGER == SDL_GAMEPAD_BUTTON_COUNT, "trigger pseudo-buttons follow SDL's buttons");
 
 // Defaults: Nintendo layout by position (east = A, south = B, north = X, west = Y), triggers = ZL / ZR;
-// keyboard WASD left stick, arrows d-pad, Space/J/L/I = A/B/X/Y, Q/E = L/R, 1/3 = ZL/ZR, Enter / Backspace = Plus /
-// Minus, F / numpad 0 = stick clicks, numpad 8/5/4/6 right stick.
+// keyboard WASD movement, E interact, Shift sprint, Space dodge, I menu, Ctrl crouch, M map, Tab focus.
+// The game reuses those face buttons for moves when focused; all bindings remain editable.
 #define DEF_PAD { \
     SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_NORTH, SDL_GAMEPAD_BUTTON_WEST, \
     SDL_GAMEPAD_BUTTON_LEFT_STICK, SDL_GAMEPAD_BUTTON_RIGHT_STICK, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, \
     SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PADB_LTRIGGER, PADB_RTRIGGER, SDL_GAMEPAD_BUTTON_START, SDL_GAMEPAD_BUTTON_BACK, \
     SDL_GAMEPAD_BUTTON_DPAD_LEFT, SDL_GAMEPAD_BUTTON_DPAD_UP, SDL_GAMEPAD_BUTTON_DPAD_RIGHT, SDL_GAMEPAD_BUTTON_DPAD_DOWN}
 #define DEF_KEY { \
-    SDL_SCANCODE_SPACE, SDL_SCANCODE_J, SDL_SCANCODE_L, SDL_SCANCODE_I, SDL_SCANCODE_F, SDL_SCANCODE_KP_0, \
-    SDL_SCANCODE_Q, SDL_SCANCODE_E, SDL_SCANCODE_1, SDL_SCANCODE_3, SDL_SCANCODE_RETURN, SDL_SCANCODE_BACKSPACE, \
+    SDL_SCANCODE_E, SDL_SCANCODE_LSHIFT, SDL_SCANCODE_I, SDL_SCANCODE_SPACE, SDL_SCANCODE_LCTRL, SDL_SCANCODE_Q, \
+    SDL_SCANCODE_T, SDL_SCANCODE_G, SDL_SCANCODE_TAB, SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_M, SDL_SCANCODE_BACKSPACE, \
     SDL_SCANCODE_LEFT, SDL_SCANCODE_UP, SDL_SCANCODE_RIGHT, SDL_SCANCODE_DOWN, \
     SDL_SCANCODE_W, SDL_SCANCODE_S, SDL_SCANCODE_A, SDL_SCANCODE_D, SDL_SCANCODE_KP_8, SDL_SCANCODE_KP_5, \
-    SDL_SCANCODE_KP_4, SDL_SCANCODE_KP_6}
+    SDL_SCANCODE_KP_4, SDL_SCANCODE_KP_6, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4, SDL_SCANCODE_R, SDL_SCANCODE_ESCAPE, SDL_SCANCODE_O, SDL_SCANCODE_P, SDL_SCANCODE_B}
 static const int16_t k_def_pad[BIND_PAD_COUNT] = DEF_PAD, k_def_key[BIND_KEY_COUNT] = DEF_KEY;
 int16_t g_bind_pad[BIND_PAD_COUNT] = DEF_PAD, g_bind_key[BIND_KEY_COUNT] = DEF_KEY;
-// mouse: left ZR (Pokémon Z-A throws the ball), right ZL (aims / locks on)
-#define DEF_MOUSE {BIND_ZR, BIND_ZL, -1, -1, -1}
+// Left click throws; the right mouse button uses the separate hold-to-aim action.
+#define DEF_MOUSE {BIND_ZR, BIND_MOUSE_AIM, BIND_MOUSE_PARTY_TOGGLE, -1, -1}
 static const int16_t k_def_mouse[MOUSEB_COUNT] = DEF_MOUSE;
 int16_t g_bind_mouse[MOUSEB_COUNT] = DEF_MOUSE;
 static const char *const k_mouse_ini[MOUSEB_COUNT] = {"left", "right", "middle", "x1", "x2"};
@@ -52,11 +53,13 @@ bool bind_mouse_is_default(void) { return !memcmp(g_bind_mouse, k_def_mouse, siz
 static const char *const k_ini[BIND_KEY_COUNT] = {
     "a", "b", "x", "y", "lstick", "rstick", "l", "r", "zl", "zr", "plus", "minus", "left", "up", "right", "down",
     "ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right",
+    "move_a", "move_b", "move_x", "move_y", "move_plus", "cancel", "research", "pokedex", "boxes",
 };
 static const char *const k_names[BIND_KEY_COUNT] = {
     "A", "B", "X", "Y", "Left stick press", "Right stick press", "L", "R", "ZL", "ZR", "Plus", "Minus",
     "D-pad Left", "D-pad Up", "D-pad Right", "D-pad Down", "Left stick Up", "Left stick Down", "Left stick Left",
     "Left stick Right", "Right stick Up", "Right stick Down", "Right stick Left", "Right stick Right",
+    "Move A", "Move B", "Move X", "Move Y", "Plus moves", "Cancel / back", "Mable's Research", "Pokédex", "Boxes",
 };
 // controller buttons by position (larecomp.ini)
 static const char *const k_pad_ini[PADB_HOST_COUNT] = {
@@ -99,8 +102,7 @@ const char *bind_pad_label(int host, int fam) {
 
 const char *bind_key_label(int sc) {
     if (sc <= 0 || sc >= SDL_SCANCODE_COUNT) return "(none)";
-    const char *n = SDL_GetScancodeName((SDL_Scancode)sc);
-    return n && *n ? n : "(unnamed key)";
+    return za_key_token_label(sc);
 }
 
 int bind_label_family(void) {
@@ -115,16 +117,9 @@ int bind_label_family(void) {
     return any ? input_family_of_type(t) : 0;
 }
 
-// What "Auto" button icons stand for right now (PROMPTS_*, never AUTO), by the same rule runtime/hle/pl.c
-// pl_prompt_set uses at boot: a Steam Deck (unless a PlayStation pad is on it) its own; no controller the keyboard's;
-// else the controller's family. (The menus' "Auto (...)" names this.)
+// What "Auto" will select on the next start. The loaded game's font and ROM patches are fixed for the current run.
 int bind_prompts_auto(void) {
-    extern int settings_on_steam_deck(void);  // runtime/settings.c
-    bool pad = SDL_HasGamepad();
-    int fam = pad ? bind_label_family() : 0;
-    if (settings_on_steam_deck() && fam != 2) return PROMPTS_STEAMDECK;
-    if (!pad) return PROMPTS_KEYBOARD;
-    return fam == 1 ? PROMPTS_XBOX : fam == 2 ? PROMPTS_PLAYSTATION : PROMPTS_NINTENDO;
+    return input_prompt_auto();
 }
 
 static void result(int kind, int dev, int slot, int other);
@@ -238,10 +233,32 @@ bool bind_capture_event(const SDL_Event *e) {
 }
 
 // ------------------------------------------------------------------ larecomp.ini
+// Old settings only wrote differences from the old defaults. Start from that old
+// table when importing them, so a partial custom layout never silently changes.
+static int key_schema, key_load_started;
+static const int16_t legacy_key[BIND_KEY_COUNT] = {
+    SDL_SCANCODE_SPACE, SDL_SCANCODE_J, SDL_SCANCODE_L, SDL_SCANCODE_I, SDL_SCANCODE_F, SDL_SCANCODE_KP_0,
+    SDL_SCANCODE_Q, SDL_SCANCODE_E, SDL_SCANCODE_1, SDL_SCANCODE_3, SDL_SCANCODE_RETURN, SDL_SCANCODE_BACKSPACE,
+    SDL_SCANCODE_LEFT, SDL_SCANCODE_UP, SDL_SCANCODE_RIGHT, SDL_SCANCODE_DOWN,
+    SDL_SCANCODE_W, SDL_SCANCODE_S, SDL_SCANCODE_A, SDL_SCANCODE_D, SDL_SCANCODE_KP_8, SDL_SCANCODE_KP_5,
+    SDL_SCANCODE_KP_4, SDL_SCANCODE_KP_6, 0, 0, 0, 0, 0, SDL_SCANCODE_ESCAPE, SDL_SCANCODE_O, SDL_SCANCODE_P, SDL_SCANCODE_B
+};
 bool bind_settings_load(const char *key, const char *val) {
+    if (!strcmp(key, "bind_key_schema")) { key_schema = atoi(val); return true; }
+    if (!strncmp(key, "bind_key_", 9) && !key_load_started) {
+        key_load_started = 1;
+        if (key_schema < 2) memcpy(g_bind_key, legacy_key, sizeof g_bind_key);
+        else if(key_schema==2){
+            // Schema 2 wrote only overrides. Preserve an existing custom
+            // layout's implicit defaults; untouched layouts adopt 1/2/3/4.
+            g_bind_key[BIND_ZR]=SDL_SCANCODE_3;
+            const int old_moves[4]={SDL_SCANCODE_Z,SDL_SCANCODE_X,SDL_SCANCODE_C,SDL_SCANCODE_V};
+            for(int i=0;i<4;i++)g_bind_key[BIND_MOVE_A+i]=old_moves[i];
+        }
+    }
     if (!strncmp(key, "bind_mouse_", 11)) {  // bind_mouse_left = zr / none
         for (int m = 0; m < MOUSEB_COUNT; m++)
-            if (!strcmp(key + 11, k_mouse_ini[m])) g_bind_mouse[m] = (int16_t)(strcmp(val, "none") ? bind_slot_from_name(val) : -1);
+            if (!strcmp(key + 11, k_mouse_ini[m])) g_bind_mouse[m] = (int16_t)(!strcmp(val, "aim") ? BIND_MOUSE_AIM : !strcmp(val, "party_toggle") ? BIND_MOUSE_PARTY_TOGGLE : strcmp(val, "none") ? bind_slot_from_name(val) : -1);
         for (int m = 0; m < MOUSEB_COUNT; m++)
             if (g_bind_mouse[m] >= BIND_PAD_COUNT) g_bind_mouse[m] = -1;  // (buttons only: not a stick direction)
         return true;
@@ -255,6 +272,10 @@ bool bind_settings_load(const char *key, const char *val) {
                 if (!strcmp(val, k_pad_ini[h])) g_bind_pad[i] = (int16_t)h;
         } else {
             SDL_Scancode sc = strcmp(val, "none") ? SDL_GetScancodeFromName(val) : SDL_SCANCODE_UNKNOWN;
+            if(!strncmp(val,"Scancode",8)){
+                char *end;long raw=strtol(val+8,&end,10);
+                if(!*end&&raw>0&&raw<SDL_SCANCODE_COUNT)sc=(SDL_Scancode)raw;
+            }
             if (sc != SDL_SCANCODE_UNKNOWN || !strcmp(val, "none")) g_bind_key[i] = (int16_t)sc;
         }
     }
@@ -262,13 +283,45 @@ bool bind_settings_load(const char *key, const char *val) {
 }
 
 void bind_settings_save(FILE *f) {
+    fprintf(f, "bind_key_schema = 3\n");
     for (int i = 0; i < BIND_PAD_COUNT; i++)
         if (g_bind_pad[i] != k_def_pad[i] && g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT)
             fprintf(f, "bind_pad_%s = %s\n", k_ini[i], k_pad_ini[g_bind_pad[i]]);
     for (int i = 0; i < BIND_KEY_COUNT; i++)
-        if (g_bind_key[i] != k_def_key[i])
-            fprintf(f, "bind_key_%s = %s\n", k_ini[i], g_bind_key[i] ? SDL_GetScancodeName((SDL_Scancode)g_bind_key[i]) : "none");
+        if (g_bind_key[i] != k_def_key[i]){
+            const char *name=g_bind_key[i]?SDL_GetScancodeName((SDL_Scancode)g_bind_key[i]):"none";
+            if(name&&*name)fprintf(f,"bind_key_%s = %s\n",k_ini[i],name);
+            else fprintf(f,"bind_key_%s = Scancode%d\n",k_ini[i],g_bind_key[i]);
+        }
     for (int m = 0; m < MOUSEB_COUNT; m++)
         if (g_bind_mouse[m] != k_def_mouse[m])
-            fprintf(f, "bind_mouse_%s = %s\n", k_mouse_ini[m], g_bind_mouse[m] >= 0 ? k_ini[g_bind_mouse[m]] : "none");
+            fprintf(f, "bind_mouse_%s = %s\n", k_mouse_ini[m], g_bind_mouse[m] == BIND_MOUSE_AIM ? "aim" : g_bind_mouse[m] == BIND_MOUSE_PARTY_TOGGLE ? "party_toggle" : g_bind_mouse[m] >= 0 ? k_ini[g_bind_mouse[m]] : "none");
+}
+
+// A token chooses one of the complete, already loaded key glyphs. Bindings
+// are read at lookup time, so in-game text changes immediately after a rebind.
+int bind_prompt_keyboard_token(int slot,int context){
+    if(slot<0||slot>=BIND_KEY_COUNT)return 0;
+    if(context==5&&slot==BIND_A)return 525;
+    if(context==6&&(slot==BIND_L||slot==BIND_R))return slot==BIND_L?517:518;
+    if(context==0&&g_settings.mouse_camera==MOUSE_CAM_CAPTURED){
+        if(slot==BIND_LEFT||slot==BIND_RIGHT)return slot==BIND_LEFT?517:518;
+        if(slot==BIND_UP||slot==BIND_DOWN)
+            for(int i=0;i<MOUSEB_COUNT;i++)if(g_bind_mouse[i]==BIND_MOUSE_PARTY_TOGGLE)return ZA_MOUSE_TOKEN_BASE+i;
+    }
+    if((context==1||context==3||context==4||context==6||context==7)&&slot==BIND_B)slot=BIND_CANCEL;
+    else if(context==0&&slot==BIND_X)slot=BIND_CANCEL;
+    else if(context==4&&(slot==BIND_L||slot==BIND_R))slot=slot==BIND_L?BIND_LS_LEFT:BIND_LS_RIGHT;
+    else if(context==2&&(slot<=BIND_Y||slot==BIND_PLUS)){
+        int move=slot==BIND_PLUS?BIND_MOVE_PLUS:BIND_MOVE_A+slot;
+        if(!g_bind_key[move]&&g_settings.mouse_camera==MOUSE_CAM_CAPTURED)
+            for(int i=0;i<MOUSEB_COUNT;i++)if(g_bind_mouse[i]==slot)return ZA_MOUSE_TOKEN_BASE+i;
+        slot=move;
+    }
+    int mouse_action=slot;
+    if(slot==BIND_ZR&&context!=3)mouse_action=BIND_MOUSE_AIM;
+    if(g_settings.mouse_camera==MOUSE_CAM_CAPTURED){
+        for(int i=0;i<MOUSEB_COUNT;i++)if(g_bind_mouse[i]==mouse_action)return ZA_MOUSE_TOKEN_BASE+i;
+    }
+    return g_bind_key[slot]>0&&g_bind_key[slot]<512?g_bind_key[slot]:0;
 }

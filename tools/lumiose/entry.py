@@ -8,8 +8,8 @@ import tempfile
 from datetime import datetime
 
 ROOT = Path(__file__).resolve().parents[2]
-GAME_CODE_REVISION = 'camera-distance-v1'
-LAUNCHER_VERSION = 'v0.1.31'
+GAME_CODE_REVISION = 'pc-controls-v1'
+LAUNCHER_VERSION = 'v0.1.32'
 sys.path.insert(0, str(ROOT / 'tools' / 'lumiose'))
 from auto_launch import launch
 from platform_paths import EXECUTABLE, GAME_LIBRARY, lock_file
@@ -47,6 +47,8 @@ def main():
     first_setup = not state.exists()
     current_revision = revision.read_text(encoding='utf-8').strip() if revision.is_file() else ''
     log_event(f'Launcher started; initial setup required: {first_setup}; game-code revision check required: {current_revision != GAME_CODE_REVISION}')
+    if current_revision != GAME_CODE_REVISION:
+        (ROOT / 'textures/prompts/.made').unlink(missing_ok=True)
     if first_setup or current_revision != GAME_CODE_REVISION:
         print('Checking game setup for this launcher. Keep this window open.', flush=True)
         if first_setup:

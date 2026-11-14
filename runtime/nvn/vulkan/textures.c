@@ -22,6 +22,7 @@
 #include "../renderer.h"
 #include "../texpatch.h"
 #include "../../settings.h"
+#include "../../hle/za_title_prompt.h"
 
 // ================================================================== formats
 typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
@@ -585,6 +586,7 @@ static TexBackend *tex_backend(NvnTexture *t) {
 }
 
 static void hd_forget(NvnTexture *t);  // (HD texture packs, below)
+static void hd_reset_prompt(void);
 void backend_texture_destroyed(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
@@ -621,6 +623,7 @@ void vk_textures_reset(void) {
         free(b);
     }
     vk_collect_dead();
+    hd_reset_prompt();
     LOG("[vk] reboot: %d textures released%s\n", n, stale ? " (some without their texture: see below)" : "");
     if (stale) LOG("[vk] reboot: %d of them belonged to textures already gone (#70)\n", stale);
 }
@@ -644,6 +647,13 @@ static int hd_on = -1, hd_dump = -1;
 // silently ignored (#139: "turning it on nothing changes")
 typedef struct { uint64_t *h; uint16_t *f; int n; char dir[48]; char (*fold)[400]; int nfold; } HdSet;
 static HdSet hd_sets[2];  // [0] button prompts, [1] HD pack
+static bool prompt_set_initialized;
+static int prompt_live_style = -1;
+static bool title_prompt_texture(const NvnTexture *t){
+    extern uint8_t g_main_build_id[8];
+    return za_title_prompt_shape(g_main_build_id,t->width,t->height,t->format,t->target,t->samples);
+}
+static void hd_reset_prompt(void) { prompt_set_initialized = false; prompt_live_style = -1; }
 static int hd_cmp(const void *a, const void *b) { uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b; return x < y ? -1 : x > y; }
 typedef struct { uint64_t h; uint16_t f; } HdEnt;
 static int hd_ent_cmp(const void *a, const void *b) {
@@ -704,18 +714,21 @@ static const char *hd_folder(const HdSet *s, uint64_t h) {
 }
 
 static void hd_init(void) {
-    if (hd_on >= 0) return;
-    const char *e = ENV("LARECOMP_TEX_HD");
-    hd_on = e ? atoi(e) != 0 : g_settings.tex_hd;
-    e = ENV("LARECOMP_TEX_DUMP");
-    hd_dump = e ? atoi(e) != 0 : g_settings.tex_dump;
-    if (hd_dump) { SDL_CreateDirectory("textures"); SDL_CreateDirectory("textures/dump"); }
+    if (hd_on >= 0 && prompt_set_initialized) return;
+    if (hd_on < 0) {
+        const char *e = ENV("LARECOMP_TEX_HD");
+        hd_on = e ? atoi(e) != 0 : g_settings.tex_hd;
+        e = ENV("LARECOMP_TEX_DUMP");
+        hd_dump = e ? atoi(e) != 0 : g_settings.tex_dump;
+        if (hd_dump) { SDL_CreateDirectory("textures"); SDL_CreateDirectory("textures/dump"); }
+        if (hd_on) hd_scan(&hd_sets[1], "textures/hd");
+    }
     extern const char *pl_prompt_set(void);
     const char *set = pl_prompt_set();
     char dir[48];
     snprintf(dir, sizeof dir, "textures/prompts/%s", set ? set : "");
-    if (set) hd_scan(&hd_sets[0], dir);
-    if (hd_on) hd_scan(&hd_sets[1], "textures/hd");
+    hd_scan(&hd_sets[0], set ? dir : "");
+    prompt_set_initialized = true;
 }
 
 static const HdSet *hd_find(uint64_t h) {
@@ -1070,6 +1083,46 @@ static void hd_switch(void) {
     if (flip_at == -2) { const char *e = ENV("LARECOMP_TEX_HD_FLIP"); flip_at = e ? atol(e) : -1; }
     if (flip_at >= 0 && vk_frame_counter() == (uint64_t)flip_at) g_settings.tex_hd = !g_settings.tex_hd;
     hd_init();
+    // A binding refresh publishes the complete new set by changing .made.
+    // Re-upload prompt textures on this render thread, just as a device or
+    // context switch does; keyboard font glyphs already resolve live bindings.
+    static uint64_t marker_at;static char marker[96];
+    uint64_t now=plat_now_ns();
+    if(now>=marker_at){
+        marker_at=now+1000000000ull;
+        FILE *f=fopen("textures/prompts/.made","rb");
+        if(f){char next[96]={0};fgets(next,sizeof next,f);fclose(f);next[strcspn(next,"\r\n")]=0;
+            if(*next&&strcmp(next,marker)){snprintf(marker,sizeof marker,"%s",next);prompt_live_style=-1;}
+        }
+    }
+    extern int rt_za_live_prompt_style(void);
+    int style = rt_za_live_prompt_style();
+    if (style >= 0 && style != prompt_live_style) {
+        HdSet next = {0}, old = hd_sets[0];
+        const char *dir = style == PROMPTS_KEYBOARD || style == 100 ? "textures/prompts/keyboard" :
+                          style == 101 ? "textures/prompts/keyboard_menu" :
+                          style == 102 ? "textures/prompts/keyboard_battle" :
+                          style == 103 ? "textures/prompts/keyboard_aim" :
+                          style == 104 ? "textures/prompts/keyboard_bag" :
+                          style == 105 ? "textures/prompts/keyboard_title" :
+                          style == 106 ? "textures/prompts/keyboard_box" :
+                          style == PROMPTS_XBOX ? "textures/prompts/xbox" : "";
+        hd_scan(&next, dir);
+        hd_sets[0] = next;
+        int changed = 0;
+        for (int i = 0; i < g_nlive; i++) {
+            TexBackend *b = g_live[i];
+            uint64_t h = b->data_hash;
+            if (!(title_prompt_texture(b->owner)||(old.n && bsearch(&h, old.h, old.n, sizeof h, hd_cmp)) ||
+                  (next.n && bsearch(&h, next.h, next.n, sizeof h, hd_cmp)))) continue;
+            if (b->hd) { destroy_image(b); b->hd = false; create_image(b->owner, b); }
+            b->uploaded = false;
+            changed++;
+        }
+        free(old.h); free(old.f); free(old.fold);
+        prompt_live_style = style;
+        LOG("[tex] live prompts: %d (%d textures refreshed)\n", style, changed);
+    }
     if (last < 0) { last = g_settings.tex_hd; return; }
     if (g_settings.tex_hd == last) return;
     last = g_settings.tex_hd;
@@ -1431,12 +1484,23 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     b->data_hash = h;
     b->uploaded = true;
     hd_init();
-    if (b->hd && (b->dynamic || !(hd_has(h) || lm_listed(h)))) {  // an HD-replaced texture the game rewrote: back to its own image
+    bool title_keyboard=prompt_live_style==105&&title_prompt_texture(t);
+    if (b->hd && (b->dynamic || !(title_keyboard||hd_has(h) || lm_listed(h)))) {  // an HD-replaced texture the game rewrote: back to its own image
         destroy_image(b);
         b->hd = false;
         create_image(t, b);
     } else if (b->hd) {
         return;
+    }
+    if(title_keyboard){
+        HdData replacement;
+        if(hd_read_png("textures/prompts/title_any_key.png",&replacement)){
+            bool applied=hd_apply(t,b,h,&replacement);free(replacement.buf);
+            if(applied){
+                static bool logged;if(!logged){logged=true;LOG("[prompts] native title any-key guide applied\n");}
+                return;
+            }
+        }
     }
     if (hd_candidate(t, b)) {
         // (a pack texture: drawn from its image now when it is in memory, else the game's below until it is read)

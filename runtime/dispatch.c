@@ -10,10 +10,10 @@
 #include <dlfcn.h>
 #endif
 
-#include "gamelib.h"
-#include "hle.h"
-#include "game_addresses.h"
-#include "lumiose_map_guard.h"
+ #include "gamelib.h"
+ #include "hle.h"
+ #include "game_addresses.h"
+ #include "lumiose_map_guard.h"
 
 typedef struct { const uint64_t *addrs; const GuestFn *fns; uint64_t count, lo, hi; } FnTable;
 static FnTable tables[3];
@@ -321,6 +321,44 @@ __attribute__((noinline)) static void dispatch_miss(Cpu *c) {
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
+    if(c->pc==0x7000df69c0ull){
+        extern bool input_native_ball_mouse(Cpu *);
+        input_native_ball_mouse(c);
+    }
+    if(c->pc==0x7001011b40ull||c->pc==0x70010121c4ull){
+        extern void input_native_layout_destroy(uint64_t);
+        input_native_layout_destroy(c->x[0]);
+    }
+    // The map's native input-controller update owns this instance throughout
+    // the call. Consume wheel zoom through its native event, on the game thread.
+    if(c->pc==0x7002b114c0ull||c->pc==0x7000ceeb00ull||c->pc==0x7000890390ull||c->pc==0x70008de1d0ull){
+        static const uint8_t build[]={0xb1,0xf1,0x2f,0xd9,0x19,0xea,0xe8,0x6a};
+        if(!memcmp(g_main_build_id,build,sizeof build)){
+            extern void input_native_map_tick(Cpu *);
+            input_native_map_tick(c);
+        }
+    }
+    // The game's live layout update delegate owns this reference throughout
+    // the call. Preserve its animation update, then apply HUD presentation
+    // before the later layout-matrix/render phase.
+    if(c->pc==0x7001018320ull&&c->x[0]>=0x7400000000ull&&c->x[0]<=0x77fffffff8ull){
+        extern void input_native_layout_tick(uint64_t);
+        extern void input_native_layout_prepare(uint64_t);
+        static const uint8_t build[]={0xb1,0xf1,0x2f,0xd9,0x19,0xea,0xe8,0x6a};
+        if(!memcmp(g_main_build_id,build,sizeof build)){
+            uint64_t layout=LD64(c->x[0]);GuestFn native=dispatch_lookup(c->pc);
+            if(native){input_native_layout_prepare(layout);native(c);input_native_layout_tick(layout);extern void input_native_moves_flush(Cpu *);input_native_moves_flush(c);return;}
+        }
+    }
+    // The verified native list update publishes this page's current binding.
+    // Dispatch mouse actions after the game has finished its widget update.
+    if(c->pc==0x7000fc4c80ull){
+        static const uint8_t build[]={0xb1,0xf1,0x2f,0xd9,0x19,0xea,0xe8,0x6a};
+        if(!memcmp(g_main_build_id,build,sizeof build)){
+            GuestFn native=dispatch_lookup(c->pc);
+            if(native){native(c);extern void input_native_moves_flush(Cpu *);input_native_moves_flush(c);return;}
+        }
+    }
     // Lumiose probes an optional character map while creating temporary models.
     // Some intro and evolution objects have a different layout; their alleged
     // map count or mutex word is not a valid map. Treat the lookup as absent.
@@ -340,6 +378,19 @@ void rt_dispatch(Cpu *c) {
             LOG("[lumiose] skipped unavailable optional character map (bucket count %llx, mutex %x)\n", (unsigned long long)buckets, mutex);
             c->x[0] = 0;
             return;
+        }
+    }
+    // Z-A 2.0.2 ball-cancel condition, reached through this one verified
+    // caller. Preserve the game's predicate side effects before overriding
+    // its result for a single pending mouse throw cancellation.
+    if (c->pc == 0x70008d5facull && c->x[30] == 0x7000140f84ull &&
+        c->x[0] >= 0x7400000000ull && c->x[0] <= 0x77ffffffc0ull &&
+        LD64(c->x[0]) == 0x7003ce3148ull) {
+        extern bool input_mouse_throw_cancel_pending(void);
+        extern uint64_t input_mouse_throw_cancel_result(uint64_t);
+        if (input_mouse_throw_cancel_pending()) {
+            GuestFn f = dispatch_lookup(c->pc);
+            if (f) { f(c); c->x[0] = input_mouse_throw_cancel_result(c->x[0]); return; }
         }
     }
     unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);

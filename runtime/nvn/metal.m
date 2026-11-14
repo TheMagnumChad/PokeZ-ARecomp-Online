@@ -1,6 +1,7 @@
 #include <sys/mman.h>
 #include "paths.h"
 #include "settings.h"
+#include "input_bind.h"
 #include "ui/menu.h"
 // Metal renderer for the NVN layer: window, textures, command execution, presentation.
 #include <sys/stat.h>
@@ -1632,6 +1633,7 @@ int ui_run(void) {
             input_rumble_poll();
             if (e.type == SDL_EVENT_QUIT) { input_rumble_stop(); input_led_stop(); LOG("window closed\n"); backend_quit(); exit(0); }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
+            input_note_prompt_event(&e);
             input_cursor_event(&e);
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);

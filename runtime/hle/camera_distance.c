@@ -18,7 +18,7 @@ void za_camera_scale_offset(float v[3], float target_height, int percent) {
 
 void rt_za_camera_distance(uint64_t object, uint64_t caller) {
     // Only the follow-camera consumer: this shared getter also serves the title and other camera properties.
-    if (g_settings.camera_distance == 100 || caller != 0x7000371bf4ull ||
+    if (caller != 0x7000371bf4ull ||
         object < 0x7000000000ull || object > 0x7800000000ull - 0x2e8 ||
         LD64(object) != 0x7003c106a0ull) return;
     float offset[3], height;
@@ -26,6 +26,11 @@ void rt_za_camera_distance(uint64_t object, uint64_t caller) {
     memcpy(&height, (const void *)(uintptr_t)(object + 0x2e4), sizeof height);
     if (!isfinite(height) || !isfinite(offset[0]) || !isfinite(offset[1]) || !isfinite(offset[2]) ||
         fabsf(offset[0]) >= 30 || fabsf(offset[1]) >= 30 || fabsf(offset[2]) >= 30) return;
+    // Share the native optical direction, independently of distance. Both
+    // camera modes then consume the same mouse-driven pose during aim/return.
+    extern void input_native_follow_offset(const float *,float);
+    input_native_follow_offset(offset,height);
+    if(g_settings.camera_distance==100)return;
     za_camera_scale_offset(offset, height, g_settings.camera_distance);
     memcpy((void *)(uintptr_t)(object + 0x2c0), offset, sizeof offset);
 }

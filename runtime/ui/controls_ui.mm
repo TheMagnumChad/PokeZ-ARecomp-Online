@@ -44,8 +44,28 @@ static int cat_rows(int cat, bool pad, Bind *out) {
                *right = TR("Right", "Direita");
     switch (cat) {
     case CAT_BUTTONS:
-        add(BIND_A, "A"), add(BIND_B, "B"), add(BIND_X, "X"), add(BIND_Y, "Y"), add(BIND_PLUS, TR("Plus", "Mais")),
-            add(BIND_MINUS, TR("Minus", "Menos"));
+        if (!pad && !menu_la_rows()) {
+            add(BIND_A, TR("Interact / confirm", "Interagir / confirmar"));
+            add(BIND_B, TR("Sprint", "Correr"));
+            add(BIND_CANCEL, TR("Cancel / back", "Cancelar / voltar"));
+            add(BIND_X, TR("Satchel / menu X", "Bolsa / menu X"));
+            add(BIND_RESEARCH, TR("Mable's Research", "Pesquisa de Myosotis"));
+            add(BIND_POKEDEX, TR("Pokédex", "Pokédex"));
+            add(BIND_BOXES, TR("Boxes", "Caixas"));
+            add(BIND_Y, TR("Dodge", "Esquivar"));
+            add(BIND_PLUS, TR("Map / Plus moves", "Mapa / Golpes Plus"));
+            add(BIND_MINUS, TR("Photo mode", "Modo foto"));
+        } else {
+            add(BIND_A, "A"), add(BIND_B, "B"), add(BIND_X, "X"), add(BIND_Y, "Y"), add(BIND_PLUS, TR("Plus", "Mais")),
+                add(BIND_MINUS, TR("Minus", "Menos"));
+        }
+        if (!pad) {
+            add(BIND_MOVE_A, TR("Move A", "Golpe A"), TR("While focused", "Durante foco"));
+            add(BIND_MOVE_B, TR("Move B", "Golpe B"));
+            add(BIND_MOVE_X, TR("Move X", "Golpe X"));
+            add(BIND_MOVE_Y, TR("Move Y", "Golpe Y"));
+            add(BIND_MOVE_PLUS, TR("Plus moves", "Golpes Plus"));
+        }
         break;
     case CAT_TRIGGERS: add(BIND_L, "L"), add(BIND_R, "R"), add(BIND_ZL, "ZL"), add(BIND_ZR, "ZR"); break;
     case CAT_STICKS:  // (a controller's sticks stay its sticks: only their presses are buttons)
@@ -92,22 +112,30 @@ static void stick_mouse_rows() {
     {
         const char *const modes[] = {TR("Off", "Desligado"), TR("Hold the right button", "Segurando o botão direito"),
                                      TR("Always", "Sempre")};
-        changed |= opt_choice(TR("Camera", "Câmera"), &g_settings.mouse_camera, modes, 3, MOUSE_CAM_CAPTURED,
+        if (opt_choice(TR("Camera", "Câmera"), &g_settings.mouse_camera, modes, 3, MOUSE_CAM_CAPTURED,
                               TR("Always: while you play, the cursor is hidden and moving the mouse turns the camera; F1 or "
-                                 "Esc (the menu) or switching windows gives the cursor back. The mouse buttons below work "
+                                 "switching windows gives the cursor back. The mouse buttons below work "
                                  "only then. Hold Left Alt to free the cursor and click the game's touch interface.",
-                                 "Sempre: enquanto você joga, o cursor some e mexer o mouse gira a câmera; F1 ou Esc (o "
-                                 "menu) ou trocar de janela devolve o cursor. Segure Alt esquerdo para clicar na interface. "
+                                 "Sempre: enquanto você joga, o cursor some e mexer o mouse gira a câmera; F1 ou "
+                                 "trocar de janela devolve o cursor. Segure Alt esquerdo para clicar na interface. "
                                  "Os botões do mouse abaixo só valem nesse modo."),
-                              false);
+                              false)) {
+            changed = true;
+            settings_save();
+            launcher_prompts_refresh();
+        }
         changed |= opt_slider(TR("Camera speed", "Velocidade da câmera"), &g_settings.mouse_sens, 0.1f, 5.0f, 0.05f, 1.0f,
                               "%.2f", TR("How fast the mouse turns the camera.", "O quanto o mouse gira a câmera."));
+        changed |= opt_toggle(TR("Keep camera direction while aiming", "Manter direção da câmera ao mirar"),
+                              &g_settings.mouse_aim_camera, true,
+                              TR("Keep the mouse view steady while aiming a Poké Ball in Z-A 2.0.2. Battle focus retains its normal camera when not aiming a ball.",
+                                 "Mantém a câmera do mouse estável ao mirar uma Poké Bola no Z-A 2.0.2. O foco em batalha mantém a câmera normal quando não mira uma bola."));
         // the Switch buttons a mouse button can press (as in Configure inputs)
-        static const int opts[] = {-1, BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
+        static const int opts[] = {-1, BIND_MOUSE_AIM, BIND_MOUSE_PARTY_TOGGLE, BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
                                    BIND_UP, BIND_DOWN, BIND_LEFT, BIND_RIGHT, BIND_LSTICK, BIND_RSTICK};
         enum { NOPT = sizeof opts / sizeof opts[0] };
         const char *names[NOPT];
-        for (int i = 0; i < NOPT; i++) names[i] = opts[i] >= 0 ? bind_input_name(opts[i]) : TR("(none)", "(nenhum)");
+        for (int i = 0; i < NOPT; i++) names[i] = opts[i] >= 0 ? bind_input_name(opts[i]) : opts[i] == BIND_MOUSE_AIM ? TR("Hold to aim", "Segurar para mirar") : opts[i] == BIND_MOUSE_PARTY_TOGGLE ? TR("Send Pokémon (Up)", "Enviar Pokémon (cima)") : TR("(none)", "(nenhum)");
         for (int m = 0; m < MOUSEB_COUNT; m++) {
             int cur = 0, def = 0;
             for (int i = 0; i < NOPT; i++) {
@@ -117,10 +145,12 @@ static void stick_mouse_rows() {
             static const char *const mnames[MOUSEB_COUNT][2] = {{"Left button", "Botão esquerdo"}, {"Right button", "Botão direito"},
                 {"Middle button", "Botão do meio"}, {"Back button", "Botão voltar"}, {"Forward button", "Botão avançar"}};
             if (opt_choice(TR(mnames[m][0], mnames[m][1]), &cur, names, NOPT, def,
-                           TR("The Switch button this mouse button presses (Camera: Always).",
-                              "O botão do Switch que este botão do mouse aperta (Câmera: Sempre)."))) {
+                           TR("Choose a game button or a mouse action (Camera: Always). Send Pokémon uses the Up command.",
+                              "Escolha um botão do jogo ou uma ação do mouse (Câmera: Sempre). Enviar Pokémon usa o comando para cima."))) {
                 g_bind_mouse[m] = (int16_t)opts[cur];
                 changed = true;
+                settings_save();
+                launcher_prompts_refresh();
             }
         }
         if (!bind_mouse_is_default() &&
@@ -129,6 +159,8 @@ static void stick_mouse_rows() {
                           "O botão esquerdo aperta ZR, o direito ZL, os outros nada."))) {
             bind_mouse_reset();
             changed = true;
+            settings_save();
+            launcher_prompts_refresh();
         }
     }
     if (changed) settings_save();
@@ -377,12 +409,13 @@ extern "C" void controls_tab_draw(float scale) {
     {
         char autol[64];  // (what Auto stands for now: bind_prompts_auto, the same rule as runtime/hle/pl.c)
         const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation", TR("Keyboard", "Teclado"), "Steam Deck"};
-        snprintf(autol, sizeof autol, "Auto (%s)", names[bind_prompts_auto()]);
+        int automatic = bind_prompts_auto();
+        snprintf(autol, sizeof autol, "Auto (%s)", automatic == PROMPTS_NINTENDO ? TR("Original", "Original") : names[automatic]);
         opt_choice(TR("Button icons", "Ícones dos botões"), &g_settings.prompts, names, 6, PROMPTS_AUTO,
-                   TR("The button icons the game shows. Auto: the connected controller's (the keyboard's with none). "
-                      "Applies from the next start.",
-                      "Os ícones de botões que o jogo mostra. Auto: os do controle conectado (os do teclado se não houver "
-                      "controle). Vale a partir do próximo início."));
+                   TR("Auto follows the last input: keyboard, Xbox, or the original icons for other controllers. "
+                      "Supported game builds switch during play; other builds switch on the next start. Manual choices apply on the next start.",
+                      "Auto usa o último dispositivo: teclado, Xbox ou ícones originais para outros controles. "
+                      "Versões compatíveis mudam durante o jogo; outras mudam no próximo início. Escolhas manuais valem no próximo início."));
     }
     opt_toggle(TR("Battle moves by position", "Golpes por posição"), &g_settings.battle_abxy_position, false,
                TR("While ZL is held, the controller's A / B / X / Y go by position (the Switch's A on the right), so each "

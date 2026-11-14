@@ -75,6 +75,7 @@ Settings g_settings = {
     .diff_damage = 1.0f,
     .mouse_camera = MOUSE_CAM_CAPTURED,
     .mouse_sens = 1.0f,
+    .mouse_aim_camera = true,
     .walk_speed = 1.0f,
     .walk_speed_dungeons = false,
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
@@ -378,6 +379,7 @@ void settings_load(void) {
         else if (!strcmp(key, "xbox_attack_layout")) g_settings.xbox_attack_layout = atoi(val) != 0;
         else if (!strcmp(key, "mouse_camera")) g_settings.mouse_camera = !strcmp(val, "off") ? MOUSE_CAM_OFF : !strcmp(val, "hold") ? MOUSE_CAM_HOLD : MOUSE_CAM_CAPTURED;
         else if (!strcmp(key, "mouse_sens")) g_settings.mouse_sens = (float)atof(val);
+        else if (!strcmp(key, "mouse_aim_camera")) g_settings.mouse_aim_camera = atoi(val) != 0;
         else if (!strcmp(key, "rstick_snap")) { int d = atoi(val); g_settings.rstick_snap = d < 0 ? 0 : d > 30 ? 30 : d; }
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
@@ -508,6 +510,7 @@ void settings_save(void) {
     static const char *const mouse_cam[] = {"off", "hold", "captured"};
     fprintf(f, "mouse_camera = %s\nmouse_sens = %.2f\n", mouse_cam[g_settings.mouse_camera <= 2 ? g_settings.mouse_camera : 2],
             g_settings.mouse_sens);
+    fprintf(f, "mouse_aim_camera = %d\n", g_settings.mouse_aim_camera);
     fprintf(f, "rumble = %d\n", g_settings.rumble);
     fprintf(f, "rumble_strength = %d\n", g_settings.rumble_strength);
     fprintf(f, "controller_light = %d\n", g_settings.controller_light);

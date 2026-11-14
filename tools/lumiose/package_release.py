@@ -3,6 +3,7 @@ import argparse
 import hashlib
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,12 +24,18 @@ def main():
     p.add_argument('--python', type=Path, required=True, help='Portable CPython 3.12 folder')
     p.add_argument('--deps', type=Path, required=True, help='Python dependencies (unicorn, capstone, lz4)')
     p.add_argument('--lasgen', type=Path, help='Freshly built generator folder (otherwise use the support folder)')
+    p.add_argument('--build-dir', type=Path, default=ROOT / 'build/win-lumiose-release')
+    p.add_argument('--zaprompts', type=Path)
     p.add_argument('--out', type=Path, required=True, help='Empty destination folder')
     a = p.parse_args()
     out = a.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()): raise RuntimeError('Destination must be empty')
-    build = ROOT / 'build/win-lumiose-release'
+    build = a.build_dir
+    prompt_dir = a.zaprompts if a.zaprompts else a.support / 'zaprompts'
+    check = subprocess.run([str(prompt_dir / 'zaprompts.exe'), '--prompt-schema'], capture_output=True, text=True, timeout=30)
+    if check.returncode or check.stdout.strip() != 'ZAPromptSchema 17':
+        raise RuntimeError('Rebuild the current prompt helper and pass --zaprompts')
     for n in ('lasrecomp.exe', 'Lumiose Online.exe', 'lasrecomp.dll.a'):
         copy_file(build / n, out / n)
     copy_file(build / 'lasrecomp.dll.a', out / 'build/lasrecomp.dll.a')
@@ -37,13 +44,14 @@ def main():
         if (a.support / n).is_file(): copy_file(a.support / n, out / n)
     copy_file(ROOT / 'README.md', out / 'ZA-Recomp-README.md')
     copy_file(ROOT / 'LICENSE', out / 'ZA-Recomp-LICENSE.txt')
+    copy_file(ROOT / 'docs/PC-CONTROLS.md', out / 'docs/PC-CONTROLS.md')
     for n in ('DejaVuSans.ttf', 'DejaVuSans-Bold.ttf'):
         copy_file(ROOT / 'third_party/fonts/DejaVu' / n, out / n)
     copy_file(ROOT / 'third_party/fonts/DejaVu/LICENSE', out / 'DejaVu-LICENSE.txt')
     copy_file(ROOT / 'third_party/rnnoise/COPYING', out / 'RNNOISE-LICENSE.txt')
     copy_file(ROOT / 'assets/lumiose_icon.png', out / 'icon.png')
     for n in ('zig', 'lasgen', 'zaimport', 'zaprompts', 'dx12', 'D3D12'):
-        src = a.lasgen if n == 'lasgen' and a.lasgen else a.support / n
+        src = a.lasgen if n == 'lasgen' and a.lasgen else prompt_dir if n == 'zaprompts' else a.support / n
         if not src.is_dir(): raise RuntimeError(f'Required support folder missing: {src}')
         shutil.copytree(src, out / n)
     for n in ('dx12/dzn_icd.x86_64.json', 'dx12/vulkan_dzn.dll', 'dx12/Mesa-LICENSE.rst',

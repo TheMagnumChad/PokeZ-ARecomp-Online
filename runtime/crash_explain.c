@@ -90,7 +90,7 @@ static bool dozen_crash_to_vulkan(void) {
 bool rt_compile_crash_at(uint64_t pc) { return in_gpu_driver(pc) || getenv("LARECOMP_TEST_COMPILE_CRASH"); }
 
 void rt_crash_explain(char *out, size_t n, const char *log_path) {
-    static const char *const report = "Please report it as a GitHub issue and attach the log file below. "
+    static const char *const report = "Please report this bug in the LumioseOnline Discord and attach the log file below. "
                                       "Your progress up to your last save or autosave is safe.";
     // (g_game_is_la is Link's Awakening's until the game's files are read: a crash on the start screen or while the
     // GPU starts said "LAS Recomp stopped", #159)
@@ -165,11 +165,12 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
     } else if (in_gpu_driver(g_pc)) {
         snprintf(head, sizeof head, "Your graphics driver crashed");
         snprintf(what, sizeof what, "Update your graphics driver (NVIDIA, AMD or Intel) and try again. If it keeps "
-                 "happening, please report it with the log file below.");
+                 "happening, please report it in the LumioseOnline Discord with the log file below.");
     } else if (has("VK_") || has("Vulkan")) {
         snprintf(head, sizeof head, "Graphics driver error");
         snprintf(what, sizeof what, "%s needs a graphics driver with Vulkan 1.3: install the latest driver for "
-                 "your GPU (NVIDIA, AMD or Intel). If it keeps happening, please report it with the log file below.", app);
+                 "your GPU (NVIDIA, AMD or Intel). If it keeps happening, please report it in the LumioseOnline Discord "
+                 "with the log file below.", app);
     } else if (has("out of memory") || has("cannot allocate") || has("alloc failed")) {
         snprintf(head, sizeof head, "Out of memory");
         snprintf(what, sizeof what, "Close other programs and try again.");
