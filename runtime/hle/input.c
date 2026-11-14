@@ -1920,9 +1920,13 @@ bool input_cursor_hidden(void) { return cursor_hidden; }
 void input_cursor_event(const SDL_Event *e) {
     static float moved;  // (points the mouse moved since the cursor was hidden)
     bool hide = false, show = false;
-    extern int g_start_screen;
-    if (pad && !g_start_screen && !game_mouse_menu_state(za_menu_state()) && (e->type == SDL_EVENT_MOUSE_MOTION ||
-        e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_MOUSE_WHEEL)) return;
+    // A controller disables mouse camera motion, but never owns the cursor.
+    // Keep the mouse usable for the mod's overworld icons and every menu.
+    if (pad) {
+        SDL_ShowCursor();
+        cursor_hidden = false, moved = 0;
+        return;
+    }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:  // (a modifier alone - Cmd / Alt for switching apps - isn't play)
         hide = !e->key.repeat && !(e->key.scancode >= SDL_SCANCODE_LCTRL && e->key.scancode <= SDL_SCANCODE_RGUI);
@@ -2434,7 +2438,7 @@ void input_mouse_update(SDL_Window *w) {
     }
     bool want = g_settings.mouse_camera == MOUSE_CAM_CAPTURED && !menu_cursor_needed() && !input_user_blocked_any() &&
                 !mouse_touch_enabled() && (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS);
-    if (!want && ((!pad && keys_down[SDL_SCANCODE_LALT]) || game_mouse_menu_active() || lumiose_scroll_menu_open()) && (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS)) {
+    if (!want && (pad || keys_down[SDL_SCANCODE_LALT] || game_mouse_menu_active() || lumiose_scroll_menu_open()) && (SDL_GetWindowFlags(w) & SDL_WINDOW_INPUT_FOCUS)) {
         SDL_ShowCursor(); cursor_hidden = false;
     }
     if (want == mouse_held) return;
@@ -2519,8 +2523,8 @@ void input_handle_event(const SDL_Event *e) {
         if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
         SDL_free(ids);
     }
-    if (pad && !game_mouse_menu_state(za_menu_state()) && (e->type == SDL_EVENT_MOUSE_MOTION || e->type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
-                e->type == SDL_EVENT_MOUSE_BUTTON_UP || e->type == SDL_EVENT_MOUSE_WHEEL)) return;
+    // Mouse clicks still feed the mod's touchscreen UI with a controller
+    // connected. Camera and gameplay-button paths retain their own pad gates.
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
         if(input_title_key_event(e))return; // Do not carry the confirming key's gameplay action forward.

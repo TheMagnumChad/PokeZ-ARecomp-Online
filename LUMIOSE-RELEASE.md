@@ -1,4 +1,4 @@
-# Lumiose Online for ZA Recomp — v0.1.32 (Windows)
+# Lumiose Online for ZA Recomp — v0.1.33 (Windows)
 
 ## Install or update
 
@@ -37,3 +37,5 @@ Please report bugs in the **LumioseOnline Discord**, including the affected
 screen, the action and the log file. This release contains the accepted controls
 changes; the separate graphics work is not included. Game ROMs, extracted game
 assets, generated game libraries, saves, settings and caches are not distributed.
+
+With a controller connected the cursor stays visible: click mod icons and menus directly. Keyboard-only players can hold Left Alt for overworld UI.

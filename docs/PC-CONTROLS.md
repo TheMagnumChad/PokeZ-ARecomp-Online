@@ -50,3 +50,5 @@ While using keyboard and mouse, the four battle moves appear in a horizontal row
 Keyboard prompts include a complete key glyph bank, with distinct left/right modifiers, numpad keys, function/media keys, mouse buttons and wheel directions. Inline button prompts and the move row read current bindings during play. Texture prompts refresh after the binding helper finishes. Existing custom keyboard layouts retain their saved keys; untouched layouts adopt the new defaults.
 
 At the game title screen, press any keyboard key to continue. This confirmation is limited to the verified title state; the confirming key does not become a held gameplay input.
+
+With a controller connected, the mouse cursor stays visible and usable during gameplay and in all menus. Click the mod icons in the overworld directly; Alt is not required. The controller continues to control the camera. Without a controller, hold Left Alt to release the mouse for overworld UI.
