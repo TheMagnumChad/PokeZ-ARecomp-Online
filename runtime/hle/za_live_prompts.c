@@ -119,7 +119,6 @@ uint32_t rt_za_prompt_code(uint32_t cp) {
         int context = atomic_load(&contexts_ready) ? input_keyboard_prompt_context() : 0;
         if (context==4&&!atomic_load(&bag_context_ready))context=1;
         if (context < 0 || context > 7) context = 0;
-        if(context==7&&(cp==0xe323||cp==0xe324))return ' ';
         if(atomic_load(&keybank_ready)){
             if(cp==0xe335||cp==0xe33c||cp==0xe33d)return ZA_KEY_GLYPH_BASE+523;
             if(cp==0xe336||cp==0xe33e||cp==0xe33f)return ZA_KEY_GLYPH_BASE+

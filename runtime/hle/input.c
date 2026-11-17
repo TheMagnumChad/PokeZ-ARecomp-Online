@@ -215,13 +215,17 @@ static void recompute_keyboard(void) {
     for (int i = 0; i < BIND_PAD_COUNT; i++)
         if (held_key(g_bind_key[i])) b |= 1ull << i;
     bool focus_down = held_key(g_bind_key[BIND_ZL]);
-    if (scene!=ZA_BIGMAP_STATE && focus_down && !key_focus_was_down){
+    // Change Moves: ZL / ZR switch its tabs (Available Moves / Available TMs), so there the ZL key is plain ZL, held while
+    // held - the focus latch would hold ZL down from one press to the next and the tabs never see a press.
+    bool moves_page = scene==0xb8a5d7646147b713ull;  // (ZA_MOVES_STATE, defined further down)
+    if (scene!=ZA_BIGMAP_STATE && !moves_page && focus_down && !key_focus_was_down){
         key_focus_toggled = !key_focus_toggled;key_focus_acquired=false;
         key_focus_started=key_focus_toggled?SDL_GetTicksNS():0;
         key_focus_started_frame=key_focus_toggled?renderer_present_count():0;
     }
     key_focus_was_down = focus_down;
-    if (key_focus_toggled) b |= 1ull << BTN_ZL;
+    if (moves_page) { if (focus_down) b |= 1ull << BTN_ZL; else b &= ~(1ull << BTN_ZL); }
+    else if (key_focus_toggled) b |= 1ull << BTN_ZL;
     else b &= ~(1ull << BTN_ZL);
     // These face buttons have ordinary actions as well as focused moves.
     // Sprint is handled separately because it must not cancel ball aiming.
@@ -679,10 +683,17 @@ static _Atomic int za_list_guard_selected, za_list_guard_cols;
 extern uint64_t input_buttons_now(void);
 extern uint64_t renderer_present_count(void);
 
+static bool za_list_nav_input(void);
 void rt_za_list_select(Cpu *c) {
     if (!atomic_load(&za_list_guard) || c->x[0] != atomic_load(&za_list_guard_owner) ||
         atomic_load(&za_list_guard_epoch) != atomic_load(&mouse_list_scene_epoch) ||
         atomic_load(&za_list_guard_scene) != za_menu_state()) return;
+    // A held direction (keys, stick, pad) is the player moving the selection: let it through and drop the guard, which
+    // only keeps the selection still while a wheel scroll animates (arrows / W S on Change Moves went back to the pinned entry).
+    if (za_list_nav_input()) {
+        atomic_store(&za_list_guard, false);
+        return;
+    }
     int cols = atomic_load(&za_list_guard_cols), top = (int)(uint32_t)c->x[2];
     if (cols > 0 && cols <= 20 && top >= 0 && top <= 10000)
         c->x[1] = (uint32_t)(atomic_load(&za_list_guard_selected) - top * cols);
@@ -936,9 +947,7 @@ static void za_list_tick_locked(Cpu *c) {
             s->selected = (int)absolute; s->target = (int)top; s->pinned = true;
         } else return;
     }
-    if ((input_buttons_now() & ((1ull << BTN_UP) | (1ull << BTN_DOWN) | (1ull << BTN_LEFT) | (1ull << BTN_RIGHT))) ||
-        abs(atomic_load(&key_lx)) > 16000 || abs(atomic_load(&pad_lx)) > 16000 || abs(atomic_load(&pad_ly)) > 16000 ||
-        atomic_load(&mouse_menu_running)) s->recover = true;
+    if (za_list_nav_input() || atomic_load(&mouse_menu_running)) s->recover = true;
     if (LD32(sc + 0x178)) {
         Cpu saved = *c; c->x[0] = o; guest_call(c, 0x7000fc7e00ull); *c = saved;
     }
@@ -953,6 +962,10 @@ static void za_list_tick_locked(Cpu *c) {
         }
         s->pinned = s->recover = false;
     }
+}
+static bool za_list_nav_input(void) {
+    return (input_buttons_now() & ((1ull << BTN_UP) | (1ull << BTN_DOWN) | (1ull << BTN_LEFT) | (1ull << BTN_RIGHT))) ||
+        abs(atomic_load(&key_lx)) > 16000 || abs(atomic_load(&pad_lx)) > 16000 || abs(atomic_load(&pad_ly)) > 16000;
 }
 void rt_za_list_tick(Cpu *c) {
     if (za_list_busy) return;
@@ -1040,8 +1053,7 @@ void input_native_layout_tick(uint64_t layout) {
     bool keyboard=input_prompt_auto()==PROMPTS_KEYBOARD;
     za_battle_hud_tick(layout,keyboard);
     za_battle_keys_publish(layout,keyboard);
-    if(keyboard&&za_menu_state()==ZA_MOVES_STATE&&za_ui_layout_pane(layout,"L_skill_list_00")&&za_ui_layout_pane(layout,"L_switchitem_01"))
-        za_ball_ui_hide(layout,"L_switch_00");
+    // (Change Moves' L_switch_00 - the ZL / ZR tab icons - stays shown on keyboard: those keys switch its tabs now)
     za_ball_ui_tick(layout,mouse_ball_ui_closing());
 }
 void input_native_layout_destroy(uint64_t layout){za_ball_ui_forget(layout);za_battle_hud_forget(layout);}

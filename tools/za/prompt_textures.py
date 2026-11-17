@@ -429,7 +429,7 @@ def label(style, button, context='field'):
                 for mouse,assigned in mouse_binds.items():
                     if assigned==button:return MOUSE_LABEL[mouse]
             slot='move_'+button
-        action='aim' if slot=='zr' and context!='aim' else slot
+        action='aim' if slot=='zr' and context in ('field','battle') else slot  # (menus: ZR is a plain button, e.g. Change Moves' tabs)
         if mouse_camera=='captured':
             for mouse,assigned in mouse_binds.items():
                 if assigned==action:return MOUSE_LABEL[mouse]
