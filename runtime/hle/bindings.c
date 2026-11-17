@@ -258,7 +258,7 @@ bool bind_settings_load(const char *key, const char *val) {
     }
     if (!strncmp(key, "bind_mouse_", 11)) {  // bind_mouse_left = zr / none
         for (int m = 0; m < MOUSEB_COUNT; m++)
-            if (!strcmp(key + 11, k_mouse_ini[m])) g_bind_mouse[m] = (int16_t)(!strcmp(val, "aim") ? BIND_MOUSE_AIM : !strcmp(val, "party_toggle") ? BIND_MOUSE_PARTY_TOGGLE : strcmp(val, "none") ? bind_slot_from_name(val) : -1);
+            if (!strcmp(key + 11, k_mouse_ini[m])) g_bind_mouse[m] = (int16_t)(!strcmp(val, "aim") ? BIND_MOUSE_AIM : !strcmp(val, "party_toggle") ? BIND_MOUSE_PARTY_TOGGLE : !strcmp(val, "focus") ? BIND_MOUSE_FOCUS : strcmp(val, "none") ? bind_slot_from_name(val) : -1);
         for (int m = 0; m < MOUSEB_COUNT; m++)
             if (g_bind_mouse[m] >= BIND_PAD_COUNT) g_bind_mouse[m] = -1;  // (buttons only: not a stick direction)
         return true;
@@ -295,7 +295,7 @@ void bind_settings_save(FILE *f) {
         }
     for (int m = 0; m < MOUSEB_COUNT; m++)
         if (g_bind_mouse[m] != k_def_mouse[m])
-            fprintf(f, "bind_mouse_%s = %s\n", k_mouse_ini[m], g_bind_mouse[m] == BIND_MOUSE_AIM ? "aim" : g_bind_mouse[m] == BIND_MOUSE_PARTY_TOGGLE ? "party_toggle" : g_bind_mouse[m] >= 0 ? k_ini[g_bind_mouse[m]] : "none");
+            fprintf(f, "bind_mouse_%s = %s\n", k_mouse_ini[m], g_bind_mouse[m] == BIND_MOUSE_AIM ? "aim" : g_bind_mouse[m] == BIND_MOUSE_PARTY_TOGGLE ? "party_toggle" : g_bind_mouse[m] == BIND_MOUSE_FOCUS ? "focus" : g_bind_mouse[m] >= 0 ? k_ini[g_bind_mouse[m]] : "none");
 }
 
 // A token chooses one of the complete, already loaded key glyphs. Bindings

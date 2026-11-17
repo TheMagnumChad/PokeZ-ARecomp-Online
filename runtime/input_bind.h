@@ -33,7 +33,10 @@ extern int16_t g_bind_pad[BIND_PAD_COUNT];  // PADB value per Switch button
 extern int16_t g_bind_key[BIND_KEY_COUNT];  // SDL_Scancode per input (0 = none)
 // Mouse buttons -> Switch button (BIND_A..BIND_DOWN, -1 none): the other way round from the tables above, so a mouse
 // button adds to the keyboard's key instead of taking its place. Only while the mouse camera holds the cursor.
-enum { BIND_MOUSE_AIM = -2, BIND_MOUSE_PARTY_TOGGLE = -3 }; // hold to aim; release cancels, left click throws
+// BIND_MOUSE_FOCUS: hold to focus (lock on), as ZL is held on a controller. It sets the keyboard's focus latch (the
+// one Tab toggles), so the focused move keys (1/2/3/4) work; a mouse button bound to plain ZL presses the game's ZL
+// without that latch, and the move keys stay off.
+enum { BIND_MOUSE_AIM = -2, BIND_MOUSE_PARTY_TOGGLE = -3, BIND_MOUSE_FOCUS = -4 }; // hold to aim; release cancels, left click throws
 enum { MOUSEB_LEFT, MOUSEB_RIGHT, MOUSEB_MIDDLE, MOUSEB_X1, MOUSEB_X2, MOUSEB_COUNT };
 extern int16_t g_bind_mouse[MOUSEB_COUNT];
 const char *bind_mouse_name(int mb);           // "Left button"

@@ -131,11 +131,11 @@ static void stick_mouse_rows() {
                               TR("Keep the mouse view steady while aiming a Poké Ball in Z-A 2.0.2. Battle focus retains its normal camera when not aiming a ball.",
                                  "Mantém a câmera do mouse estável ao mirar uma Poké Bola no Z-A 2.0.2. O foco em batalha mantém a câmera normal quando não mira uma bola."));
         // the Switch buttons a mouse button can press (as in Configure inputs)
-        static const int opts[] = {-1, BIND_MOUSE_AIM, BIND_MOUSE_PARTY_TOGGLE, BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
+        static const int opts[] = {-1, BIND_MOUSE_AIM, BIND_MOUSE_PARTY_TOGGLE, BIND_MOUSE_FOCUS, BIND_A, BIND_B, BIND_X, BIND_Y, BIND_L, BIND_R, BIND_ZL, BIND_ZR, BIND_PLUS, BIND_MINUS,
                                    BIND_UP, BIND_DOWN, BIND_LEFT, BIND_RIGHT, BIND_LSTICK, BIND_RSTICK};
         enum { NOPT = sizeof opts / sizeof opts[0] };
         const char *names[NOPT];
-        for (int i = 0; i < NOPT; i++) names[i] = opts[i] >= 0 ? bind_input_name(opts[i]) : opts[i] == BIND_MOUSE_AIM ? TR("Hold to aim", "Segurar para mirar") : opts[i] == BIND_MOUSE_PARTY_TOGGLE ? TR("Send Pokémon (Up)", "Enviar Pokémon (cima)") : TR("(none)", "(nenhum)");
+        for (int i = 0; i < NOPT; i++) names[i] = opts[i] >= 0 ? bind_input_name(opts[i]) : opts[i] == BIND_MOUSE_AIM ? TR("Hold to aim", "Segurar para mirar") : opts[i] == BIND_MOUSE_PARTY_TOGGLE ? TR("Send Pokémon (Up)", "Enviar Pokémon (cima)") : opts[i] == BIND_MOUSE_FOCUS ? TR("Hold to focus", "Segurar para focar") : TR("(none)", "(nenhum)");
         for (int m = 0; m < MOUSEB_COUNT; m++) {
             int cur = 0, def = 0;
             for (int i = 0; i < NOPT; i++) {
@@ -145,8 +145,8 @@ static void stick_mouse_rows() {
             static const char *const mnames[MOUSEB_COUNT][2] = {{"Left button", "Botão esquerdo"}, {"Right button", "Botão direito"},
                 {"Middle button", "Botão do meio"}, {"Back button", "Botão voltar"}, {"Forward button", "Botão avançar"}};
             if (opt_choice(TR(mnames[m][0], mnames[m][1]), &cur, names, NOPT, def,
-                           TR("Choose a game button or a mouse action (Camera: Always). Send Pokémon uses the Up command.",
-                              "Escolha um botão do jogo ou uma ação do mouse (Câmera: Sempre). Enviar Pokémon usa o comando para cima."))) {
+                           TR("Choose a game button or a mouse action (Camera: Always). Send Pokémon uses the Up command. Hold to focus locks on while held, with the focused move keys (1/2/3/4).",
+                              "Escolha um botão do jogo ou uma ação do mouse (Câmera: Sempre). Enviar Pokémon usa o comando para cima. Segurar para focar trava no alvo enquanto segura, com as teclas de golpe (1/2/3/4)."))) {
                 g_bind_mouse[m] = (int16_t)opts[cur];
                 changed = true;
                 settings_save();

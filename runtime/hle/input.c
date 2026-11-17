@@ -187,6 +187,11 @@ static _Atomic uint64_t key_normal_actions, key_normal_unseen, key_normal_taps;
 static _Atomic uint64_t cancel_edge_start; // frame + 1; ensures a new cancel edge if sprint is held
 extern uint64_t renderer_present_count(void);
 static bool key_focus_toggled, key_focus_was_down;
+// A mouse button bound to "Hold to focus" (BIND_MOUSE_FOCUS) drives the same latch as Tab, but held: its press turns
+// focus on, its release turns it off (recompute_mouse_locked sets mouse_focus_down from mouse_down). The target-lost
+// release in input_frame still applies, and a press that finds no target drops it again after a few frames.
+static _Atomic bool mouse_focus_down;
+static bool mouse_focus_was_down;
 static bool key_focus_acquired;
 static uint64_t key_focus_started;
 static uint64_t key_focus_started_frame;
@@ -221,6 +226,16 @@ static void recompute_keyboard(void) {
         key_focus_started_frame=key_focus_toggled?renderer_present_count():0;
     }
     key_focus_was_down = focus_down;
+    bool mouse_focus = atomic_load(&mouse_focus_down);
+    if (scene!=ZA_BIGMAP_STATE && mouse_focus != mouse_focus_was_down) {
+        if (mouse_focus && !key_focus_toggled) {
+            key_focus_toggled = true;key_focus_acquired=false;
+            key_focus_started=SDL_GetTicksNS();key_focus_started_frame=renderer_present_count();
+        } else if (!mouse_focus && key_focus_toggled) {
+            key_focus_toggled = false;key_focus_started=0;key_focus_started_frame=0;
+        }
+    }
+    mouse_focus_was_down = mouse_focus;
     if (key_focus_toggled) b |= 1ull << BTN_ZL;
     else b &= ~(1ull << BTN_ZL);
     // These face buttons have ordinary actions as well as focused moves.
@@ -1771,7 +1786,7 @@ static void note_press(uint64_t down, uint64_t up) {
 // so a movement key cannot remain stuck after the player finishes typing.
 void input_release_keyboard_for_chat(void) {
     memset(keys_down, 0, sizeof keys_down);
-    key_focus_toggled = key_focus_was_down = false;
+    key_focus_toggled = key_focus_was_down = mouse_focus_was_down = false;
     recompute_keyboard();
     atomic_store(&key_normal_unseen, 0); atomic_store(&key_normal_taps, 0);
 }
@@ -1802,7 +1817,7 @@ void input_reset(void) {
     pthread_mutex_unlock(&legacy_chat_lock);
     rumble_clear();
     memset(keys_down, 0, sizeof keys_down);
-    key_focus_toggled = key_focus_was_down = false;
+    key_focus_toggled = key_focus_was_down = mouse_focus_was_down = false;
     recompute_keyboard();
     atomic_store(&key_normal_unseen, 0); atomic_store(&key_normal_taps, 0);
 }
@@ -2297,9 +2312,12 @@ static uint64_t aim_since, aim_wheel_frame = UINT64_MAX, aim_wheel_pulse;
 static void recompute_mouse_locked(void) {
     extern uint64_t renderer_present_count(void);
     uint64_t frame = renderer_present_count();
-    bool aim = false;
-    for (int m = 0; m < MOUSEB_COUNT; m++)
+    bool aim = false, focus = false;
+    for (int m = 0; m < MOUSEB_COUNT; m++) {
         if (g_bind_mouse[m] == BIND_MOUSE_AIM && mouse_down[m]) aim = true;
+        if (g_bind_mouse[m] == BIND_MOUSE_FOCUS && mouse_down[m]) focus = true;
+    }
+    atomic_store(&mouse_focus_down, focus);  // (read by recompute_keyboard: no game button of its own)
     if (!aim) aim_blocked_until_release = false;
     if (aim_blocked_until_release) aim = false;
     bool left_throw = mouse_down[MOUSEB_LEFT] && g_bind_mouse[MOUSEB_LEFT] == BIND_ZR;
@@ -2838,6 +2856,8 @@ void input_handle_event(const SDL_Event *e) {
         uint64_t after = mouse_buttons;
         pthread_mutex_unlock(&mouse_buttons_lock);
         note_press(after & ~before, before & ~after);
+        // Hold to focus goes through the keyboard's focus latch (outside the mouse lock, as key events do).
+        if (g_bind_mouse[m] == BIND_MOUSE_FOCUS) recompute_keyboard();
         break;
     }
     case SDL_EVENT_MOUSE_WHEEL: {
@@ -3269,7 +3289,7 @@ RT_ON_RESET(input_reboot_reset) {
     mouse_menu_down = -1; mouse_tab_down = -1; mouse_tab_down_scene = 0; mouse_menu_down_scene = 0; mouse_menu_drag_started = false;
     mouse_hover_last = -1; mouse_hover_scene = 0;
     g_pad_obj = 0; g_inject_plus = 0;
-    key_focus_toggled = key_focus_was_down = false;
+    key_focus_toggled = key_focus_was_down = mouse_focus_was_down = false;
     atomic_store(&title_confirm_until,0);
     key_focus_acquired=false;key_focus_started=0;key_focus_started_frame=0;atomic_store(&key_focus_feedback_seen,0);atomic_store(&key_focus_feedback_active,0);atomic_store(&key_focus_object_seen,0);atomic_store(&key_focus_object_active,0);
     atomic_store(&mouse_dex_grid_observation,0);atomic_store(&mouse_dex_splash_observation,0);mouse_dex_open_down=false;
@@ -3289,6 +3309,8 @@ RT_ON_RESET(input_reboot_reset) {
 }  // (reboot: the controller object was guest memory)
 void input_frame(uint64_t frame) {
     recompute_mouse(); // advance aim/cancel transitions even without more mouse events
+    // (a Hold to focus button let go by a mouse-capture change, not by its own event: end the focus here)
+    if (atomic_load(&mouse_focus_down) != mouse_focus_was_down) recompute_keyboard();
     uint64_t scene = za_menu_state();
     if(scene!=ZA_OUTFITS_STATE||menu_input_captured()||lumiose_scroll_menu_open()){
         mouse_outfits_action_down=false;atomic_store(&mouse_outfits_action_until,0);

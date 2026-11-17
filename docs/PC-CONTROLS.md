@@ -14,6 +14,7 @@ Hover over main-menu options, party members, Satchel entries, Pokédex grid entr
 | Dodge roll | Space |
 | Crouch / stand | Left Ctrl |
 | Focus / lock on | Press Tab to toggle; requires a closed focus indicator and releases when the target is lost |
+| Focus while held (optional) | Assign **Hold to focus** to a mouse button in Settings > Controls > Mouse; releasing it ends focus |
 | Aim Poké Ball | Hold right mouse button |
 | Throw Poké Ball | Left mouse button (while aiming or on its own) |
 | Cycle Poké Ball types | Scroll wheel while aiming |
