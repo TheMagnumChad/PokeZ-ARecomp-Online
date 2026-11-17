@@ -27,8 +27,12 @@ static _Atomic bool za_mouse_ui_pending;
 static ZaMouseUiTarget za_mouse_ui_down,za_mouse_ui_hover;
 static ZaMouseUiTarget za_mouse_ui_pointer;
 
+// EventBattle (0x5ded21e11dae9a4d: trainer / story battles, entered from an Event) is gameplay like the field: its
+// battle HUD binds GridPanel groups too, and counting them as a menu freed the mouse for the whole battle (camera
+// off, mouse buttons ignored, menu prompts) - wild battles in FieldMain never had this.
+#define ZA_EVENT_BATTLE_STATE 0x5ded21e11dae9a4dull
 static bool za_mouse_ui_scene_allowed(uint64_t scene) {
-    return scene && scene!=ZA_FIELD_STATE && scene!=ZA_TITLE_STATE && scene!=0x29570d7577520f57ull &&
+    return scene && scene!=ZA_FIELD_STATE && scene!=ZA_EVENT_BATTLE_STATE && scene!=ZA_TITLE_STATE && scene!=0x29570d7577520f57ull &&
         scene!=ZA_BOX_STATE && scene!=ZA_BAG_STATE &&
         scene!=ZA_DEX_STATE && scene!=ZA_RESEARCH_STATE && scene!=ZA_QUEST_STATE;
 }
