@@ -60,6 +60,7 @@ bool rando_tab_took_back(void);  // rando_tab.mm: B went back from the Triforce 
 #include "../hle/lumiose_chat_bridge.h"
 extern "C" bool vk_dlaa_wanted(void);  // (runtime/nvn/vulkan/dlaa.c: F1 > Temporal anti-aliasing DLAA)
 extern "C" bool vk_dlaa_available(void);
+extern "C" bool vk_fsr4_available(void);
 }
 
 #define TR(en, pt) UI_TR(en, pt)  // (runtime/settings.h: English, or Portuguese as the start screen's PT | EN)
@@ -357,11 +358,11 @@ void menu_apply_window_requests(void *win) {
     lumiose_chat_native_tick();
     static bool text_input;
     bool want_text = capturing() || lumiose_chat_native_wants_text();
-    if (want_text != text_input) {
-        if (want_text) SDL_StartTextInput(w);
-        else SDL_StopTextInput(w);
-        text_input = want_text;
-    }
+    // A focus loss (an overlay, a click on another window) stops SDL's text input by itself. Re-arm it when the
+    // window has the focus again: the open/closed transition alone left the field unable to take typed text.
+    if (want_text && !SDL_TextInputActive(w)) SDL_StartTextInput(w);
+    else if (!want_text && text_input) SDL_StopTextInput(w);
+    text_input = want_text;
     static bool dt_was, dt_maxed;  // DevTools' IDE layout wants room: maximized while open, as it was after
     if (dt_open() != dt_was) {
         dt_was = dt_open();
@@ -927,17 +928,21 @@ static void tab_display(bool in_game) {
 #ifndef __APPLE__
     if (!la) {  // (runtime/nvn/vulkan/exec.c fsr2_copy: applies at once)
         int t = g_settings.taa;
-        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2", "NVIDIA DLAA", "AMD FSR 3.1"};  // (TAA_*)
-        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 4, 0,
+        const char *taa[] = {TR("Game's", "Do jogo"), "AMD FSR 2", "NVIDIA DLAA", "AMD FSR 3.1", "AMD FSR 4.1.2"};  // (TAA_*)
+        if (opt_choice(TR("Temporal anti-aliasing", "Anti-aliasing temporal"), &t, taa, 5, 0,
                        TR("AMD FSR or NVIDIA DLAA in place of the game's own edge smoothing: they combine several frames, "
                           "so fences, railings, leaves and thin lines stay smooth and stop flickering as you move. Uses a "
                           "little GPU time. FSR 3.1 leaves less of a trail behind moving things than FSR 2 (FSR 2 if its DLL is "
-                          "missing). With any on, Anti-aliasing (SMAA) above isn't needed. DLAA: NVIDIA RTX GPUs, "
+                          "missing). FSR 4.1.2: Radeon RX 7000/9000 on Linux, with a user-supplied "
+                          "libamd_fidelityfx_upscaler_vk.so next to lasrecomp (FSR 2/3 if it is missing). With any on, "
+                          "Anti-aliasing (SMAA) above isn't needed. DLAA: NVIDIA RTX GPUs, "
                           "with nvngx_dlss.dll next to lasrecomp.exe; it applies from the next start.",
                           "AMD FSR ou NVIDIA DLAA no lugar da suavização de bordas do próprio jogo: eles combinam vários "
                           "quadros, então grades, corrimões, folhas e linhas finas ficam lisos e param de tremular quando "
                           "você anda. Usa um pouco da GPU. O FSR 3.1 deixa menos rastro atrás do que se move que o FSR 2 (FSR 2 se a "
-                          "DLL dele faltar). Com um deles ligado, o Anti-aliasing (SMAA) acima não é "
+                          "DLL dele faltar). FSR 4.1.2: Radeon RX 7000/9000 no Linux, com um "
+                          "libamd_fidelityfx_upscaler_vk.so fornecido pelo usuário ao lado do lasrecomp (FSR 2/3 se faltar). "
+                          "Com um deles ligado, o Anti-aliasing (SMAA) acima não é "
                           "necessário. DLAA: GPUs NVIDIA RTX, com o nvngx_dlss.dll ao lado do lasrecomp.exe; vale a partir "
                           "do próximo início.")))
             g_settings.taa = t;
@@ -951,7 +956,14 @@ static void tab_display(bool in_game) {
                                                      "O DLAA não está disponível: são necessários uma GPU NVIDIA RTX e o nvngx_dlss.dll.")
                                                 : TR("DLAA starts with the next start of the game.",
                                                      "O DLAA começa no próximo início do jogo."));
-        if (g_settings.taa == TAA_FSR2 || g_settings.taa == TAA_FSR3) {  // (exec.c vk_taa_render_share: applies at once)
+        if (g_settings.taa == TAA_FSR4 && !vk_fsr4_available())
+            ImGui::TextColored(ImVec4(0.95f, 0.71f, 0.27f, 1), "%s",
+                               TR("FSR 4.1.2 isn't available: its libamd_fidelityfx_upscaler_vk.so and fsr4-assets folder "
+                                  "must be next to lasrecomp, and the GPU needs cooperative matrix and shader float8.",
+                                  "O FSR 4.1.2 não está disponível: o libamd_fidelityfx_upscaler_vk.so e a pasta "
+                                  "fsr4-assets precisam estar ao lado do lasrecomp, e a GPU precisa de cooperative matrix "
+                                  "e shader float8."));
+        if (g_settings.taa == TAA_FSR2 || g_settings.taa == TAA_FSR3 || g_settings.taa == TAA_FSR4) {  // (exec.c vk_taa_render_share: applies at once)
             // AMD's FSR modes (Native AA, Quality 1.5x, Balanced 1.7x, Performance 2x; not Ultra Performance's 3x:
             // temporal_aa_render keeps 50-100). An ini value between them shows as the nearest, kept until a pick.
             static const int pcts[] = {100, 67, 59, 50};
@@ -1305,7 +1317,9 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
         ImGui::SetWindowFontScale(font_scale * chat_scale.text * (g_chat_font ? 1.0f : 16.0f / 34.0f));
         static unsigned focused_sequence;
         unsigned sequence = g_kbd_sequence.load();
-        if (focused_sequence != sequence) { ImGui::SetKeyboardFocusHere(); focused_sequence = sequence; }
+        if (focused_sequence != sequence || !ImGui::IsAnyItemActive()) {
+            ImGui::SetKeyboardFocusHere(); focused_sequence = sequence;
+        }
         ImGui::SetNextItemWidth(-1);
         char input_id[48];
         snprintf(input_id, sizeof input_id, "##lumiose-input-%u", sequence);
@@ -1332,7 +1346,11 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
                        TR("Type a chat message", "Digite uma mensagem") : TR("Enter your name", "Digite seu nome"));
     ImGui::PopFont();
     static bool was_open, was_pad;
-    bool pad = !g_kbd_chat.load() && g_last_pad.load(), appearing = !was_open || pad != was_pad;
+    // A connected pad gets the on-screen keyboard even if Steam Input also sends keyboard events (the last event would
+    // otherwise flip the dialog to keyboard mode and leave the pad's buttons doing nothing).
+    // LARECOMP_KBD_KEYBOARD=1: type with the physical keyboard even while a pad is connected.
+    bool pad = !getenv("LARECOMP_KBD_KEYBOARD") && !g_kbd_chat.load() && (g_last_pad.load() || SDL_HasGamepad()),
+         appearing = !was_open || pad != was_pad;
     was_open = true, was_pad = pad;
     if (!pad) {  // keyboard: type straight into the field
         if (appearing) ImGui::SetKeyboardFocusHere();

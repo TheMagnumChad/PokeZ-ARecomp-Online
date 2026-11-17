@@ -8,7 +8,9 @@ A game lookup can return no entry just after the title screen. The launcher now 
 
 - New installation: extract the complete **ZA Recomp** folder into a writable
   location and open **Lumiose Online.exe**. Supply your own Pokemon Legends:
-  Z-A game files, update 2.0.2 and DLC. Normal bundled mod setup is included.
+  Z-A game files, update 2.0.2 and DLC. A 2.0.2 `.nup` works too and needs no
+  keys; add the DLC 2 `.nsp` with your `prod.keys` / `title.keys` if you want the
+  DLC. Normal bundled mod setup is included.
 - Existing installation: close the game and use **Update now**, or copy the
   complete archive over the existing installation, merging folders. Keep your
   saves, settings, locally generated game code and installed mod data.

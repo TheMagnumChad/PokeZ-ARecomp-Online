@@ -3696,6 +3696,7 @@ static int taa_kind(void) {
     switch (g_settings.taa) {
     case TAA_FSR2: return TAA_FSR2;
     case TAA_FSR3: return vk_fsr3_available() ? TAA_FSR3 : TAA_FSR2;
+    case TAA_FSR4: return vk_fsr4_available() ? TAA_FSR4 : vk_fsr3_available() ? TAA_FSR3 : TAA_FSR2;
     case TAA_DLAA: return vk_dlaa_available() ? TAA_DLAA : TAA_GAME;
     default: return TAA_GAME;
     }
@@ -3714,6 +3715,11 @@ float vk_taa_render_share(void) {
     int pct = env > 0 ? env : g_settings.taa_render;
     pct = pct < 50 ? 50 : pct > 100 ? 100 : pct;
     int kind = taa_kind();
+    static bool logged;
+    if (!logged) {  // (one line: which of the temporal paths the setting chose)
+        logged = true;
+        LOG("[taa] setting %d, running %d, render %d%%\n", g_settings.taa, kind, pct);
+    }
     if (pct == 100 || kind == TAA_GAME || kind == TAA_DLAA || fsr2_up_broken ||  // (DLAA: anti-aliasing only)
         g_settings.res_mode == RES_DYNAMIC || fsr2_ok_frame == ~0ull || fsr2_ok_frame + 30 < vk_frame_counter())
         return 1;
@@ -4608,10 +4614,28 @@ static uint64_t gmem_lo, gmem_window;
 // The window is anchored at the end of the physical region (gwin_max: constant for the session, so shaders may bake it): [lo, gwin_max).
 // Only with a physical-memory window (no heap), else the whole heap as before. The generated shader code computes ga = addr - base, ok = ga < size,
 // so translate_program / build_compute set base and size to the window too (the window changed them by lo: text and buildings read the wrong place).
-// default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB; LARECOMP_VK_GMEM_WINDOW=0 imports it all
+// default: on an integrated GPU (the Steam Deck: the full import cost 87 % of the render thread), 256 MB, and on any AMD GPU
+// on Linux (amdgpu revalidates a userptr import at every submit there too: an RX 7800 XT at ~7 fps with all of it);
+// LARECOMP_VK_GMEM_WINDOW=0 imports it all
+static bool gmem_switch2_edition(void) {
+    // A .nup's Switch 2 Edition upgrade add-on: the importer writes its RomFS image as aoc/0100f43008c45001.bin.
+    // The larger edition's assets reach below the top 256 MB of the physical window, which leaves those textures
+    // reading as zero (the world and all of its text black, the HUD art fine): import the whole window instead.
+    FILE *f = fopen("extracted/aoc/0100f43008c45001.bin", "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
 static void gmem_window_init(void) {
     const char *w = ENV("LARECOMP_VK_GMEM_WINDOW");
-    gmem_window = w ? strtoull(w, NULL, 10) << 20 : g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 256ull << 20 : 0;
+    bool small = g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, s2 = false;
+#ifdef __linux__
+    small = small || g_vk.props.vendorID == 0x1002;
+    // A discrete AMD GPU: the Switch 2 Edition's assets reach below the top 256 MB, so import 1 GB (the whole 3.2 GB
+    // window costs too much on amdgpu: ~11 fps against 30 at 1 GB on the RX 9070 XT). An APU keeps 256 MB.
+    if (small && g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU && gmem_switch2_edition())
+        small = false, s2 = true;
+#endif
+    gmem_window = w ? strtoull(w, NULL, 10) << 20 : s2 ? 1024ull << 20 : small ? 256ull << 20 : 0;
 }
 static void gmem_window_get(uint64_t *lo, uint64_t *len) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;  // (the translator and the render thread - run_queued_now - both ask)
@@ -5069,6 +5093,13 @@ static bool guest_heap_dmabuf(void) {
     if (gmem_buf || !g_vk.dev || !(g_vk.dmabuf || g_vk.map_placed) || getenv("LARECOMP_VK_NO_GMEM")) return false;
     const char *e = getenv("LARECOMP_VK_HEAP_DMABUF");
     if (e ? !atoi(e) : !strstr(g_vk.props.deviceName, "RADV")) return false;
+    // Pokémon Z-A has no heap: its memory is the window (gwin: physical memory, 7676b00000 on 2.0.2), past the end of this
+    // mapping. gmem_buf set here kept gmem_info from importing that window, so shaders read this empty buffer: the world
+    // and all text black, the HUD art and 60 fps intact, no error (RX 7800 XT, RADV; an APU's system heap is too small to
+    // get here, which is why the Steam Deck never showed it). Asked of the files as gmem_chunk_shift does: this runs
+    // before the boot sets g_game_is_la. LARECOMP_VK_HEAP_DMABUF=1 still forces it.
+    extern bool game_files_are_la(const char *game_dir);
+    if (!e && (!g_game_is_la || !game_files_are_la("extracted"))) return false;
     const uint64_t size = HEAP_MAX;
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
@@ -10139,6 +10170,7 @@ static bool fsr2_copy(Prog *pr) {
     if (kind != last_kind) fr.reset = true, last_kind = kind;
     VkCommandBuffer sec = fsr2_cmd();
     bool ok = kind == TAA_DLAA ? vk_dlaa_record(g_vk.dev, sec, &fr)
+              : kind == TAA_FSR4 ? vk_fsr4_record(g_vk.phys, g_vk.dev, sec, &fr)
               : kind == TAA_FSR3 ? vk_fsr3_record(g_vk.phys, g_vk.dev, sec, &fr) : vk_fsr2_record(g_vk.phys, g_vk.dev, sec, &fr);
     VK_CHECK(vkEndCommandBuffer(sec));
     if (!ok) return false;
@@ -10164,7 +10196,8 @@ static bool fsr2_copy(Prog *pr) {
     static int nlog;
     static uint32_t last_w;  // (and each change of the render size)
     if (nlog++ < 3 || w != last_w)
-        LOG("[%s] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", kind == TAA_DLAA ? "dlaa" : kind == TAA_FSR3 ? "fsr3" : "fsr2",
+        LOG("[%s] frame %llu: %ux%u -> %ux%u, jitter %.3f %.3f%s\n", kind == TAA_DLAA ? "dlaa" :
+            kind == TAA_FSR4 ? "fsr4" : kind == TAA_FSR3 ? "fsr3" : "fsr2",
             (unsigned long long)f, w, h, ow, oh, fsr2_jx, fsr2_jy, fr.reset ? ", reset" : "");
     last_w = w;
     fsr2_ok_frame = f;
