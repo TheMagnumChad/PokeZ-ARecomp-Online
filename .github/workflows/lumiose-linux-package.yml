@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build environment
-        run: docker build -t za-linux-build -f tools/linux/Containerfile tools/linux
+        run: docker build --network=host -t za-linux-build -f tools/linux/Containerfile tools/linux
       - name: Build and package without game files
         run: |
           docker run --rm -v "$PWD:/src" -w /src za-linux-build bash -euo pipefail -c '
@@ -21,6 +21,7 @@ jobs:
             JOBS=4 PYTHON=python3.12 ZIP=0 DEB=0 tools/za/dist-linux.sh
             bash tools/lumiose/package_linux.sh
             d="$PWD/build/dist/Lumiose Online Linux/usr/bin"
+            "$d/python/bin/python3.12" -I -S -B tools/linux/check_lumiose_release_bundle.py "$d"
             probe="$PWD/build/linux/direct-entry-test"
             mkdir -p "$probe/usr/bin/lumiose"
             cp "$d/lasrecomp" "$probe/usr/bin/lasrecomp"

@@ -22,9 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libvulkan-dev \
     # clang 21 from apt.llvm.org: 22.04's clang 15 lacks the __builtin_elementwise_* the lifted FP code uses (simd_fp.h)
     && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /etc/apt/trusted.gpg.d/apt.llvm.org.asc \
-    && echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-21 main" > /etc/apt/sources.list.d/llvm.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends clang-21 lld-21 llvm-21 \
+    && echo "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-21 main" > /etc/apt/sources.list.d/llvm.list \
+    && apt-get -o Acquire::Retries=5 -o APT::Update::Error-Mode=any update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends clang-21 lld-21 llvm-21 \
     && rm -rf /var/lib/apt/lists/* \
     && for t in clang clang++ ld.lld llvm-ar llvm-nm llvm-ranlib llvm-strip; do ln -sf $t-21 /usr/bin/$t; done \
     && arch=$(uname -m) \
