@@ -24,6 +24,34 @@ def _int(value,name,minimum=0):
     if type(value)is not int or not minimum<=value<=0xffffffff:raise ValueError('Invalid compatibility '+name)
     return value
 
+def normalize_hook_pools(rows):
+    if not isinstance(rows, list) or len(rows) != 2:
+        raise ValueError('Expected two executable hook pools')
+    ranges = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 2:
+            raise ValueError('Invalid executable hook pool')
+        start = _int(row[0], 'hook pool offset')
+        size = _int(row[1], 'hook pool size', 4)
+        if start % 4 or size % 4:
+            raise ValueError('Unaligned executable hook pool')
+        ranges.append([start, size])
+    ranges.sort()
+    if sorted(size for _, size in ranges) != [0x1000, 0x4000]:
+        raise ValueError('Unexpected executable hook pool sizes')
+    if ranges[0][0] + ranges[0][1] > ranges[1][0]:
+        raise ValueError('Overlapping executable hook pools')
+    return ranges
+
+def validate_hook_pools(module, ranges):
+    lo, size = module.text
+    hi = lo + size
+    for start, length in ranges:
+        if start < lo or start + length > hi or start + length > len(module.image):
+            raise ValueError('Hook pool outside executable text')
+        if any(module.image[start:start + length]):
+            raise ValueError('Hook pool is not empty in the base module')
+
 def normalize_profile(value):
     if not isinstance(value,dict) or value.get('schema')not in(SCHEMA,NATIVE_SCHEMA_V1) or type(value.get('abi_revision'))is not int or value['abi_revision']!=ABI_REVISION:
         raise ValueError('Unsupported module compatibility schema/ABI revision')
@@ -36,6 +64,8 @@ def normalize_profile(value):
     if value['schema']==NATIVE_SCHEMA_V1 and kind!='native':raise ValueError('V1 profile is native ABI only')
     result=dict(schema=value['schema'],abi_revision=ABI_REVISION,module_kind=kind,
         build_id=canonical_build_id(bytes.fromhex(full)),build_id32=full,sha256=_hex(value.get('sha256'),64,'sha256'))
+    if 'executable_hook_pools' in value:
+        result['executable_hook_pools'] = normalize_hook_pools(value['executable_hook_pools'])
     cameras=value.get('camera_query_returns')
     if not isinstance(cameras,list)or len(cameras)>MAX_CAMERA_QUERIES or(value['schema']==NATIVE_SCHEMA_V1 and len(cameras)!=3):raise ValueError('Invalid camera query return count')
     result['camera_query_returns']=[_int(x,'camera query return',4)for x in cameras]
@@ -122,6 +152,7 @@ def _validate_bound_profile(module,path,profile):
     _base_identity(path,value,size)
     module.build_id=canonical_build_id(bytes.fromhex(value['build_id32']))
     if _hash_prefix(path,size)!=value['sha256']or module.build_id!=value['build_id']:raise RuntimeError('Native compatibility module hash/build ID mismatch')
+    validate_hook_pools(module, value.get('executable_hook_pools', []))
     lo,extent=module.text;hi=lo+extent
     def instruction(offset):return lo<=offset<hi and offset%4==0
     if not all(instruction(x)for x in value['camera_query_returns']):raise RuntimeError('Native camera return outside executable text')

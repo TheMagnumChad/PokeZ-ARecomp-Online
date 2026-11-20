@@ -8,6 +8,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(root / 'tools'))
 from nso import Nso
+from native_compat import load_profile, read_update_profile, validate_hook_pools
 
 scratch = Path(os.environ['LUMIOSE_SCRATCH'])
 exefs = Path(os.environ.get('LUMIOSE_GAME_ROOT', scratch / 'extracted')) / 'exefs'
@@ -22,6 +23,36 @@ for name, base, original in names:
     modules.append((name, base, old, new))
 
 entries = {name: set() for name, *_ in modules}
+
+# Preparation validated this profile after normalizing the exact candidate.
+# Rebind it to the staged bytes before accepting any pool-based entries.
+profile_path = scratch / 'compatibility.json'
+if profile_path.is_file():
+    profile = load_profile(profile_path)
+    pools = profile.get('executable_hook_pools', [])
+    if pools:
+        base = read_update_profile(module)
+        if (base['embedded'] or profile['build_id32'] != base['build_id32'] or
+                profile['sha256'] != base['base_sha256']):
+            raise ValueError('Hook pools belong to a different base module')
+        _, _, old_mod, patched_mod = modules[2]
+        with (patched / 'subsdk9').open('rb') as stream:
+            stream.seek(0x40)
+            if stream.read(32).hex() != base['build_id32']:
+                raise ValueError('Captured module build ID differs from base')
+        if old_mod.text != patched_mod.text:
+            raise ValueError('Captured module executable segment differs from base')
+        validate_hook_pools(old_mod, pools)
+        with (scratch / 'subsdk9.image').open('rb') as capture:
+            for start, length in pools:
+                capture.seek(start)
+                observed = capture.read(length)
+                if len(observed) != length or observed != patched_mod.image[start:start + length]:
+                    raise ValueError('Hook pool bytes do not match the capture')
+                entries['lumiose'].update(
+                    start + off for off in range(0, length, 4)
+                    if observed[off:off + 4] != bytes(4))
+        print('Validated captured hook pools:', pools, flush=True)
 # The mod's printf formatter uses a jump table with destinations spanning discovered functions.
 mod = modules[2][3]
 if os.environ.get('LUMIOSE_UPDATE_TABLES'):
