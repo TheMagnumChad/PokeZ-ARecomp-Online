@@ -40,8 +40,9 @@ def module_profile(module, path, reference=None):
             accepted = validate_candidate(module, path, supplied)
             actual['additional_function_entries'] = sorted(set(actual['additional_function_entries']) |
                                                           set(accepted['additional_function_entries']))
-            if 'version' in accepted:
-                actual['version'] = accepted['version']
+            for key in ('version', 'executable_hook_pools'):
+                if key in accepted:
+                    actual[key] = accepted[key]
         DISCOVERED_COMPATIBILITY[key] = actual
     value = DISCOVERED_COMPATIBILITY[key]
     CURRENT_COMPATIBILITY[module.build_id] = value
